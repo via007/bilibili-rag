@@ -51,7 +51,7 @@ export default function SourcesPanel({ sessionId, onBuildDone, onSelectionChange
           const s = map[f.media_id];
           if (!s?.media_count) return f;
           if (f.count_source === "filtered") return f;
-          return { ...f, media_count: s.media_count, count_source: "db" };
+          return { ...f, count_source: "bili" };
         })
       );
     } catch (e) {
@@ -178,11 +178,6 @@ export default function SourcesPanel({ sessionId, onBuildDone, onSelectionChange
     // 未入库：从未同步过
     if (!lastSync) {
       return { label: "未入库", className: "empty", indexedCount };
-    }
-
-    // 避免使用 B站原始数量导致误判更新
-    if (countSource !== "filtered" && indexedCount > 0 && totalCount > indexedCount) {
-      return { label: "已入库", className: "ok", indexedCount, totalCount: indexedCount };
     }
 
     // 已入库：有同步时间

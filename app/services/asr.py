@@ -5,6 +5,7 @@ ASR 服务 - 使用 DashScope 录音文件识别
 """
 import asyncio
 import json
+import os
 import time
 from http import HTTPStatus
 from typing import Optional, Any
@@ -12,6 +13,7 @@ from urllib import request as urlrequest
 
 import dashscope
 from dashscope.audio.asr import Transcription
+from dashscope.utils.oss_utils import OssUtils
 from loguru import logger
 
 from app.config import settings
@@ -91,6 +93,7 @@ class ASRService:
         if not task_id:
             logger.warning("ASR 未返回 task_id")
             return None
+        logger.info(f"ASR 任务已提交: task_id={task_id}")
 
         start = time.time()
         while True:
@@ -110,12 +113,64 @@ class ASRService:
             return None
 
         results = self._get_output_value(output, "results", []) or []
+        status_message = self._get_output_value(output, "status_message")
+        logger.info(
+            "ASR 任务状态: task_id={}, task_status={}, status_code={}, status_message={}, results={}",
+            task_id,
+            self._get_output_value(output, "task_status"),
+            status_code,
+            status_message,
+            len(results),
+        )
         for item in results:
-            if item.get("subtask_status") == "SUCCEEDED" and item.get("transcription_url"):
+            sub_status = item.get("subtask_status")
+            transcription_url = item.get("transcription_url")
+            error_message = item.get("error_message") or item.get("message")
+            if sub_status:
+                logger.info(
+                    "ASR 子任务状态: task_id={}, subtask_status={}, has_url={}, error={}",
+                    task_id,
+                    sub_status,
+                    bool(transcription_url),
+                    error_message,
+                )
+            if sub_status == "SUCCEEDED" and transcription_url:
                 return self._download_transcription(item["transcription_url"])
 
         logger.warning("ASR 未返回有效转写结果")
         return None
 
+    def _upload_temp_file(self, file_path: str) -> Optional[str]:
+        """上传本地文件到 DashScope 临时 OSS，返回 oss:// URL"""
+        self._configure()
+        if not os.path.exists(file_path):
+            logger.warning(f"ASR 本地文件不存在: {file_path}")
+            return None
+        try:
+            oss_url = OssUtils.upload(
+                model=self.model,
+                file_path=file_path,
+                api_key=self.api_key,
+            )
+            logger.info(f"ASR 临时文件上传成功: {oss_url}")
+            return oss_url
+        except Exception as e:
+            logger.warning(f"ASR 临时文件上传失败: {e}")
+            return None
+
     async def transcribe_url(self, audio_url: str) -> Optional[str]:
         return await asyncio.to_thread(self._transcribe_sync, audio_url)
+
+    async def transcribe_local_file(self, file_path: str) -> Optional[str]:
+        """上传本地文件后进行转写"""
+        try:
+            oss_url = await asyncio.to_thread(self._upload_temp_file, file_path)
+            if not oss_url:
+                return None
+            return await asyncio.to_thread(self._transcribe_sync, oss_url)
+        finally:
+            try:
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+            except Exception:
+                logger.debug(f"ASR 临时文件清理失败: {file_path}")

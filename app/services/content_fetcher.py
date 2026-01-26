@@ -4,6 +4,13 @@ Bilibili RAG 知识库系统
 视频内容获取服务 - 二级降级策略
 """
 from typing import Optional
+from urllib.parse import urlparse
+import asyncio
+import os
+import shutil
+import subprocess
+import time
+import httpx
 from loguru import logger
 from app.models import VideoContent, ContentSource
 from app.services.bilibili import BilibiliService
@@ -98,7 +105,14 @@ class ContentFetcher:
             if not audio_url:
                 logger.info(f"[{bvid}] 未获取到音频 URL")
                 return None
-            text = await self.asr.transcribe_url(audio_url)
+            status = await self._probe_audio_url(bvid, audio_url)
+
+            if status == 403:
+                logger.info(f"[{bvid}] 音频 URL 403，改用本地下载上传 ASR")
+                text = await self._try_asr_with_local_audio(bvid, cid, audio_url)
+            else:
+                text = await self.asr.transcribe_url(audio_url)
+
             if not text or len(text) < 50:
                 logger.info(f"[{bvid}] ASR 内容过少")
                 return None
@@ -108,6 +122,123 @@ class ContentFetcher:
         except Exception as e:
             logger.warning(f"[{bvid}] ASR 失败: {e}")
             return None
+
+    async def _probe_audio_url(self, bvid: str, audio_url: str) -> Optional[int]:
+        """探测音频 URL 可达性（不带 Cookie，模拟 ASR 服务拉取）"""
+        try:
+            parsed = urlparse(audio_url)
+            safe_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+        except Exception:
+            safe_url = "unknown"
+
+        timeout = httpx.Timeout(10.0, connect=5.0)
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            status = None
+            try:
+                head = await client.head(audio_url)
+                status = head.status_code
+            except Exception as e:
+                logger.info(f"[{bvid}] 音频 URL HEAD 失败: {e}")
+
+            if status is None or status >= 400:
+                try:
+                    headers = {"Range": "bytes=0-0"}
+                    get = await client.get(audio_url, headers=headers)
+                    status = get.status_code
+                except Exception as e:
+                    logger.info(f"[{bvid}] 音频 URL GET 失败: {e}")
+
+        if status is None:
+            logger.info(f"[{bvid}] 音频 URL 不可达: {safe_url}")
+        else:
+            logger.info(f"[{bvid}] 音频 URL 可达性: {status} - {safe_url}")
+        return status
+
+    async def _try_asr_with_local_audio(
+        self, bvid: str, cid: int, audio_url: str
+    ) -> Optional[str]:
+        """音频不可达时：本地下载后上传 ASR"""
+        tmp_dir = os.path.join("data", "asr_tmp")
+        os.makedirs(tmp_dir, exist_ok=True)
+
+        try:
+            parsed = urlparse(audio_url)
+            ext = os.path.splitext(parsed.path)[1] or ".m4s"
+        except Exception:
+            ext = ".m4s"
+
+        filename = f"{bvid}_{cid}_{int(time.time())}{ext}"
+        file_path = os.path.join(tmp_dir, filename)
+
+        ok = await self.bili.download_audio_to_file(audio_url, file_path)
+        if not ok:
+            logger.info(f"[{bvid}] 本地下载音频失败")
+            return None
+
+        if os.path.exists(file_path) and os.path.getsize(file_path) < 1024:
+            logger.info(f"[{bvid}] 本地音频文件过小，跳过上传")
+            try:
+                os.remove(file_path)
+            except Exception:
+                logger.debug(f"[{bvid}] 清理过小音频失败: {file_path}")
+            return None
+
+        transcoded_path = await asyncio.to_thread(self._transcode_audio_to_wav, bvid, file_path)
+        upload_path = transcoded_path or file_path
+
+        text = await self.asr.transcribe_local_file(upload_path)
+
+        if transcoded_path and os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+            except Exception:
+                logger.debug(f"[{bvid}] 清理原始音频失败: {file_path}")
+
+        if text:
+            preview = text[:120].replace("\n", " ").strip()
+            logger.info(f"[{bvid}] 本地上传 ASR 成功，长度={len(text)}，预览：{preview}")
+        return text
+
+    def _transcode_audio_to_wav(self, bvid: str, file_path: str) -> Optional[str]:
+        """使用 ffmpeg 转码为 16k 单声道 wav，提高 ASR 兼容性"""
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            logger.info(f"[{bvid}] 未检测到 ffmpeg，跳过转码")
+            return None
+
+        base, _ext = os.path.splitext(file_path)
+        wav_path = base + ".wav"
+
+        cmd = [
+            ffmpeg,
+            "-y",
+            "-i", file_path,
+            "-ac", "1",
+            "-ar", "16000",
+            "-vn",
+            wav_path,
+        ]
+        try:
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            if result.returncode != 0:
+                err = (result.stderr or "").strip()
+                logger.info(f"[{bvid}] ffmpeg 转码失败: {err[:300]}")
+                return None
+        except Exception as e:
+            logger.info(f"[{bvid}] ffmpeg 转码异常: {e}")
+            return None
+
+        if not os.path.exists(wav_path) or os.path.getsize(wav_path) < 1024:
+            logger.info(f"[{bvid}] 转码输出过小，跳过使用 wav")
+            return None
+
+        logger.info(f"[{bvid}] 转码完成，使用 wav 上传: {wav_path}")
+        return wav_path
 
     async def _try_ai_summary(
         self, 

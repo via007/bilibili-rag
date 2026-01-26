@@ -308,14 +308,26 @@ async def _get_folder_ids_for_session(
         )
         target_session_ids = [row[0] for row in sessions_result.fetchall()]
     
-    # 构建查询
-    stmt = select(FavoriteFolder.id).where(FavoriteFolder.session_id.in_(target_session_ids))
-    
+    # 构建查询：按 media_id 去重，只保留最新的一条
+    stmt = (
+        select(
+            FavoriteFolder.id,
+            FavoriteFolder.media_id,
+            FavoriteFolder.updated_at,
+        )
+        .where(FavoriteFolder.session_id.in_(target_session_ids))
+        .order_by(FavoriteFolder.updated_at.desc())
+    )
     if media_ids:
         stmt = stmt.where(FavoriteFolder.media_id.in_(media_ids))
-        
+
     rows = await db.execute(stmt)
-    return [row[0] for row in rows.fetchall()]
+    dedup: dict[int, int] = {}
+    for folder_id, media_id, _updated_at in rows.fetchall():
+        if media_id not in dedup:
+            dedup[media_id] = folder_id
+
+    return list(dedup.values())
 
 
 async def _get_bvids_by_folder_ids(db: AsyncSession, folder_ids: List[int]) -> List[str]:
@@ -325,7 +337,14 @@ async def _get_bvids_by_folder_ids(db: AsyncSession, folder_ids: List[int]) -> L
     rows = await db.execute(
         select(FavoriteVideo.bvid).where(FavoriteVideo.folder_id.in_(folder_ids))
     )
-    return [row[0] for row in rows.fetchall()]
+    bvids = []
+    seen = set()
+    for (bvid,) in rows.fetchall():
+        if not bvid or bvid in seen:
+            continue
+        seen.add(bvid)
+        bvids.append(bvid)
+    return bvids
 
 
 async def _get_video_context(
@@ -358,13 +377,15 @@ async def _get_video_context(
     if not records:
         return "", []
     
-    # 按收藏夹分组
+    # 按收藏夹分组（对 bvid 去重，避免同一视频重复出现）
     grouped = {}
     sources = []
     seen_bvids = set()
     
     for folder_title, bvid, title, desc, content in records:
         if not bvid or not title:
+            continue
+        if bvid in seen_bvids:
             continue
         
         folder_name = folder_title or "默认收藏夹"
@@ -382,13 +403,12 @@ async def _get_video_context(
         
         grouped[folder_name].append(video_info)
         
-        if bvid not in seen_bvids:
-            seen_bvids.add(bvid)
-            sources.append({
-                "bvid": bvid,
-                "title": title,
-                "url": f"https://www.bilibili.com/video/{bvid}"
-            })
+        seen_bvids.add(bvid)
+        sources.append({
+            "bvid": bvid,
+            "title": title,
+            "url": f"https://www.bilibili.com/video/{bvid}"
+        })
     
     # 构建上下文文本
     context_parts = []
@@ -409,6 +429,7 @@ async def _get_video_titles_context(
     query = (
         select(
             FavoriteFolder.title.label("folder_title"),
+            VideoCache.bvid,
             VideoCache.title,
         )
         .join(FavoriteVideo, FavoriteVideo.folder_id == FavoriteFolder.id)
@@ -423,9 +444,13 @@ async def _get_video_titles_context(
         return ""
 
     grouped = {}
-    for folder_title, title in records:
-        if not title:
+    seen_bvids = set()
+    for folder_title, bvid, title in records:
+        if not title or not bvid:
             continue
+        if bvid in seen_bvids:
+            continue
+        seen_bvids.add(bvid)
         folder_name = folder_title or "默认收藏夹"
         grouped.setdefault(folder_name, []).append(f"- 《{title}》")
 

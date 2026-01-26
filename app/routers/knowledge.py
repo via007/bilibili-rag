@@ -12,7 +12,7 @@ from sqlalchemy import select, func, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db, get_db_context
-from app.models import FavoriteFolder, FavoriteVideo, VideoCache, UserSession
+from app.models import FavoriteFolder, FavoriteVideo, VideoCache, UserSession, ContentSource
 from app.services.bilibili import BilibiliService
 from app.services.content_fetcher import ContentFetcher
 from app.services.asr import ASRService
@@ -251,8 +251,39 @@ async def _sync_folder(
     for bvid, meta in video_map.items():
         await _upsert_video_cache(db, bvid, meta)
 
-    # 新增向量与关联
-    for bvid in added:
+    source_priority = {
+        ContentSource.BASIC_INFO.value: 1,
+        ContentSource.AI_SUMMARY.value: 2,
+        ContentSource.SUBTITLE.value: 3,
+        ContentSource.ASR.value: 4,
+    }
+
+    def _is_better_source(new_source: str, old_source: Optional[str]) -> bool:
+        return source_priority.get(new_source, 0) > source_priority.get(old_source or "", 0)
+
+    def _should_refresh_cache(cache: Optional[VideoCache]) -> bool:
+        if not cache:
+            return True
+        text = (cache.content or "").strip()
+        if len(text) < 50:
+            return True
+        if cache.content_source in (None, "", ContentSource.BASIC_INFO.value):
+            return True
+        return False
+
+    # 需要更新的已存在视频（缓存过少或来源较弱）
+    update_candidates: set[str] = set()
+    for bvid in current_bvids & existing_bvids:
+        if bvid in added:
+            continue
+        result = await db.execute(select(VideoCache).where(VideoCache.bvid == bvid))
+        cache = result.scalar_one_or_none()
+        if _should_refresh_cache(cache):
+            update_candidates.add(bvid)
+
+    # 新增/更新向量与关联
+    targets = list(added) + list(update_candidates)
+    for bvid in targets:
         meta = video_map[bvid]
         
         # 尝试添加到向量库（可能失败，但不影响记录入库）
@@ -263,24 +294,40 @@ async def _sync_folder(
             # 检查缓存内容是否缺失
             result = await db.execute(select(VideoCache).where(VideoCache.bvid == bvid))
             cache = result.scalar_one_or_none()
-            has_cached_content = bool(cache and cache.content and len(cache.content.strip()) > 10)
+            old_content = (cache.content or "").strip() if cache else ""
+            old_source = cache.content_source if cache else None
 
-            # 若无缓存内容或内容过少，先抓取并写入数据库
-            if not has_cached_content:
+            needs_fetch = bvid in added or _should_refresh_cache(cache)
+            content = None
+            should_update_cache = False
+            should_reindex = False
+
+            if needs_fetch:
                 content = await content_fetcher.fetch_content(
                     bvid, cid=meta["cid"], title=meta["title"]
                 )
-                if cache:
+                new_text = (content.content or "").strip() if content else ""
+                new_source = content.source.value if content else None
+
+                if not old_content:
+                    should_update_cache = True
+                    should_reindex = True
+                elif new_source and _is_better_source(new_source, old_source):
+                    should_update_cache = True
+                    should_reindex = True
+                elif new_text and new_text != old_content:
+                    should_update_cache = True
+                    should_reindex = True
+
+                if cache and should_update_cache:
                     cache.content = content.content
                     cache.content_source = content.source.value
                     cache.outline_json = content.outline
                     cache.is_processed = True
                     logger.info(f"[{bvid}] 已写入缓存: source={cache.content_source}")
-            else:
-                content = None
 
-            # 仅在全局无向量时才进行向量化
-            if global_count == 0:
+            # 需要重建向量：新增/升级/内容变化 或 向量缺失
+            if (global_count == 0) or should_reindex:
                 if not content:
                     content = await content_fetcher.fetch_content(
                         bvid, cid=meta["cid"], title=meta["title"]
@@ -291,10 +338,14 @@ async def _sync_folder(
                         cache.outline_json = content.outline
                         cache.is_processed = True
                         logger.info(f"[{bvid}] 已写入缓存: source={cache.content_source}")
+                try:
+                    rag.delete_video(bvid)
+                except Exception as e:
+                    logger.warning(f"删除旧向量失败 [{bvid}]: {e}")
                 chunks = rag.add_video_content(content)
                 logger.info(f"[{bvid}] 向量化完成，块数={chunks}")
             else:
-                logger.info(f"[{bvid}] 已存在向量，跳过向量化")
+                logger.info(f"[{bvid}] 内容未变化或无需升级，跳过向量化")
         except Exception as e:
             logger.warning(f"添加向量失败 [{bvid}]: {e} (仍会记录到数据库)")
         

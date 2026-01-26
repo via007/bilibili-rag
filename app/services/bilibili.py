@@ -454,3 +454,39 @@ class BilibiliService:
                 texts.append(content)
         
         return "\n".join(texts)
+
+    async def download_audio_to_file(self, audio_url: str, file_path: str) -> bool:
+        """
+        下载音频流到本地文件（带 Cookie 与 Referer）
+        
+        Args:
+            audio_url: 音频 URL
+            file_path: 本地保存路径
+            
+        Returns:
+            是否下载成功
+        """
+        if not audio_url:
+            return False
+
+        headers = dict(self.HEADERS)
+        cookies = self._get_cookies()
+
+        try:
+            async with self.client.stream(
+                "GET", audio_url, headers=headers, cookies=cookies
+            ) as resp:
+                if resp.status_code not in (200, 206):
+                    logger.warning(
+                        f"下载音频失败: status_code={resp.status_code} url={audio_url}"
+                    )
+                    return False
+                with open(file_path, "wb") as f:
+                    async for chunk in resp.aiter_bytes():
+                        if not chunk:
+                            continue
+                        f.write(chunk)
+            return True
+        except Exception as e:
+            logger.warning(f"下载音频异常: {e}")
+            return False
