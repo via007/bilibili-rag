@@ -121,7 +121,7 @@ npm run dev
 
 1. **本地下载音频**（使用登录态 Cookie 拉取）
 2. **使用 ffmpeg 转码为 16k 单声道 wav**
-3. **上传到 DashScope 临时存储**再进行 ASR
+3. **上传到 DashScope 临时存储**再进行 ASR（本地上传默认使用 `paraformer-v1`）
 
 > 请确保本机已安装 `ffmpeg` 并加入 PATH。
 

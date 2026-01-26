@@ -81,7 +81,7 @@ def _build_fallback_messages(context: str, question: str) -> list[dict]:
 def _build_direct_messages(question: str) -> list[dict]:
     """通用回答（不查库）"""
     system = (
-        "你是一个友好、简洁的助手。\n"
+        "你是一个知识库问答助手。\n"
         "请直接回答用户问题，避免引入收藏夹或知识库内容。"
     )
     return [
@@ -93,7 +93,7 @@ def _build_direct_messages(question: str) -> list[dict]:
 def _build_direct_messages_with_context(context: str, question: str) -> list[dict]:
     """带收藏夹上下文的通用回答（引导用户提问）"""
     system = (
-        "你是一个友好、简洁的助手。\n"
+        "你是一个知识库问答助手。\n"
         "以下是用户收藏夹的概览（收藏夹名称与视频标题）：\n"
         f"{context}\n\n"
         "请先回答用户问题，再根据收藏夹内容引导用户提出与收藏相关的问题。"

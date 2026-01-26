@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     )
     asr_model: str = Field(default="fun-asr", env="ASR_MODEL")
     asr_timeout: int = Field(default=600, env="ASR_TIMEOUT")
+    asr_model_local: str = Field(default="paraformer-v1", env="ASR_MODEL_LOCAL")
     
     # 应用配置
     app_host: str = Field(default="0.0.0.0", env="APP_HOST")

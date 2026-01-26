@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import LoginModal from "@/components/LoginModal";
+import DemoFlowModal from "@/components/DemoFlowModal";
 import SourcesPanel from "@/components/SourcesPanel";
 import ChatPanel from "@/components/ChatPanel";
 import { UserInfo, authApi } from "@/lib/api";
@@ -10,6 +11,7 @@ export default function Home() {
   const [session, setSession] = useState<string | null>(null);
   const [user, setUser] = useState<string | null>(null);
   const [showLogin, setShowLogin] = useState(false);
+  const [showDemo, setShowDemo] = useState(false);
   const [statsKey, setStatsKey] = useState(0);
   const [selectedFolderIds, setSelectedFolderIds] = useState<number[]>([]);
 
@@ -129,7 +131,7 @@ export default function Home() {
                 <button className="btn btn-primary btn-lg" onClick={() => setShowLogin(true)}>
                   扫码登录开始构建
                 </button>
-                <button className="btn btn-outline" onClick={() => setShowLogin(true)}>
+                <button className="btn btn-outline" onClick={() => setShowDemo(true)}>
                   体验检索流程
                 </button>
               </div>
@@ -187,6 +189,7 @@ export default function Home() {
       </footer>
 
       <LoginModal isOpen={showLogin} onClose={() => setShowLogin(false)} onSuccess={onLogin} />
+      <DemoFlowModal isOpen={showDemo} onClose={() => setShowDemo(false)} />
     </div>
   );
 }

@@ -6,6 +6,7 @@ Bilibili RAG 知识库系统
 from typing import Optional
 from urllib.parse import urlparse
 import asyncio
+import math
 import os
 import shutil
 import subprocess
@@ -186,7 +187,17 @@ class ContentFetcher:
         transcoded_path = await asyncio.to_thread(self._transcode_audio_to_wav, bvid, file_path)
         upload_path = transcoded_path or file_path
 
-        text = await self.asr.transcribe_local_file(upload_path)
+        segment_paths = [upload_path]
+        if upload_path.lower().endswith(".wav"):
+            segment_paths = await asyncio.to_thread(self._split_audio_wav, bvid, upload_path)
+
+        texts: list[str] = []
+        for segment_path in segment_paths:
+            part = await self.asr.transcribe_local_file(segment_path)
+            if part:
+                texts.append(part.strip())
+
+        text = "\n\n".join([t for t in texts if t]) if texts else None
 
         if transcoded_path and os.path.exists(file_path):
             try:
@@ -239,6 +250,89 @@ class ContentFetcher:
 
         logger.info(f"[{bvid}] 转码完成，使用 wav 上传: {wav_path}")
         return wav_path
+
+    def _get_audio_duration_sec(self, file_path: str) -> Optional[float]:
+        ffprobe = shutil.which("ffprobe")
+        if not ffprobe:
+            return None
+        cmd = [
+            ffprobe,
+            "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            file_path,
+        ]
+        try:
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            if result.returncode != 0:
+                return None
+            value = (result.stdout or "").strip()
+            return float(value) if value else None
+        except Exception:
+            return None
+
+    def _split_audio_wav(self, bvid: str, wav_path: str, segment_seconds: int = 1200) -> list[str]:
+        """将较长 wav 切分为多段，提升 ASR 成功率"""
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            logger.info(f"[{bvid}] 未检测到 ffmpeg，跳过切分")
+            return [wav_path]
+
+        duration = self._get_audio_duration_sec(wav_path)
+        if not duration or duration <= segment_seconds:
+            return [wav_path]
+
+        total_segments = int(math.ceil(duration / segment_seconds))
+        logger.info(f"[{bvid}] 音频较长({duration:.1f}s)，切分为 {total_segments} 段")
+
+        base, _ext = os.path.splitext(wav_path)
+        segment_paths: list[str] = []
+        for idx in range(total_segments):
+            start = idx * segment_seconds
+            out_path = f"{base}_part{idx+1:03d}.wav"
+            cmd = [
+                ffmpeg,
+                "-y",
+                "-i", wav_path,
+                "-ss", str(start),
+                "-t", str(segment_seconds),
+                "-ac", "1",
+                "-ar", "16000",
+                "-vn",
+                out_path,
+            ]
+            try:
+                result = subprocess.run(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                if result.returncode != 0:
+                    err = (result.stderr or "").strip()
+                    logger.info(f"[{bvid}] 切分失败: {err[:300]}")
+                    continue
+            except Exception as e:
+                logger.info(f"[{bvid}] 切分异常: {e}")
+                continue
+
+            if os.path.exists(out_path) and os.path.getsize(out_path) >= 1024:
+                segment_paths.append(out_path)
+
+        if not segment_paths:
+            return [wav_path]
+
+        try:
+            os.remove(wav_path)
+        except Exception:
+            logger.debug(f"[{bvid}] 清理原始 wav 失败: {wav_path}")
+
+        return segment_paths
 
     async def _try_ai_summary(
         self, 
