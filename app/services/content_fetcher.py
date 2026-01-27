@@ -106,13 +106,8 @@ class ContentFetcher:
             if not audio_url:
                 logger.info(f"[{bvid}] 未获取到音频 URL")
                 return None
-            status = await self._probe_audio_url(bvid, audio_url)
-
-            if status == 403:
-                logger.info(f"[{bvid}] 音频 URL 403，改用本地下载上传 ASR")
-                text = await self._try_asr_with_local_audio(bvid, cid, audio_url)
-            else:
-                text = await self.asr.transcribe_url(audio_url)
+            logger.info(f"[{bvid}] 使用 Recognition 直传（本地下载）")
+            text = await self._try_asr_with_local_audio(bvid, cid, audio_url)
 
             if not text or len(text) < 50:
                 logger.info(f"[{bvid}] ASR 内容过少")
@@ -158,7 +153,7 @@ class ContentFetcher:
     async def _try_asr_with_local_audio(
         self, bvid: str, cid: int, audio_url: str
     ) -> Optional[str]:
-        """音频不可达时：本地下载后上传 ASR"""
+        """本地下载后使用 Recognition 直传"""
         tmp_dir = os.path.join("data", "asr_tmp")
         os.makedirs(tmp_dir, exist_ok=True)
 
@@ -184,30 +179,10 @@ class ContentFetcher:
                 logger.debug(f"[{bvid}] 清理过小音频失败: {file_path}")
             return None
 
-        transcoded_path = await asyncio.to_thread(self._transcode_audio_to_wav, bvid, file_path)
-        upload_path = transcoded_path or file_path
-
-        segment_paths = [upload_path]
-        if upload_path.lower().endswith(".wav"):
-            segment_paths = await asyncio.to_thread(self._split_audio_wav, bvid, upload_path)
-
-        texts: list[str] = []
-        for segment_path in segment_paths:
-            part = await self.asr.transcribe_local_file(segment_path)
-            if part:
-                texts.append(part.strip())
-
-        text = "\n\n".join([t for t in texts if t]) if texts else None
-
-        if transcoded_path and os.path.exists(file_path):
-            try:
-                os.remove(file_path)
-            except Exception:
-                logger.debug(f"[{bvid}] 清理原始音频失败: {file_path}")
-
+        text = await self.asr.transcribe_local_file(file_path)
         if text:
             preview = text[:120].replace("\n", " ").strip()
-            logger.info(f"[{bvid}] 本地上传 ASR 成功，长度={len(text)}，预览：{preview}")
+            logger.info(f"[{bvid}] Recognition ASR 成功，长度={len(text)}，预览：{preview}")
         return text
 
     def _transcode_audio_to_wav(self, bvid: str, file_path: str) -> Optional[str]:

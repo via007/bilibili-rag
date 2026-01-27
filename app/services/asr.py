@@ -6,6 +6,8 @@ ASR 服务 - 使用 DashScope 录音文件识别
 import asyncio
 import json
 import os
+import shutil
+import subprocess
 import time
 from http import HTTPStatus
 from typing import Optional, Any
@@ -13,7 +15,7 @@ from urllib import request as urlrequest
 
 import httpx
 import dashscope
-from dashscope.audio.asr import Transcription
+from dashscope.audio.asr import Transcription, Recognition
 from dashscope.common.utils import default_headers, join_url
 from dashscope.utils.oss_utils import OssUtils
 from loguru import logger
@@ -36,6 +38,7 @@ class ASRService:
         self.model = model or getattr(settings, "asr_model", "fun-asr")
         self.timeout = timeout or getattr(settings, "asr_timeout", 600)
         self.local_model = getattr(settings, "asr_model_local", self.model)
+        self.input_format = getattr(settings, "asr_input_format", "pcm")
 
     def _configure(self) -> None:
         if not self.api_key:
@@ -48,6 +51,131 @@ class ASRService:
         if isinstance(output, dict):
             return output.get(key, default)
         return getattr(output, key, default)
+
+    def _transcode_audio_to_pcm(self, file_path: str) -> Optional[str]:
+        """转码为 16k s16le PCM，适配 Recognition"""
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            logger.info("未检测到 ffmpeg，无法转码为 PCM")
+            return None
+        base, _ext = os.path.splitext(file_path)
+        pcm_path = base + ".pcm"
+        cmd = [
+            ffmpeg,
+            "-y",
+            "-i", file_path,
+            "-f", "s16le",
+            "-acodec", "pcm_s16le",
+            "-ac", "1",
+            "-ar", "16000",
+            pcm_path,
+        ]
+        try:
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            if result.returncode != 0:
+                err = (result.stderr or "").strip()
+                logger.warning(f"转码 PCM 失败: {err[:200]}")
+                return None
+            return pcm_path
+        except Exception as e:
+            logger.warning(f"转码 PCM 异常: {e}")
+            return None
+
+    def _transcode_audio_to_wav(self, file_path: str) -> Optional[str]:
+        """转码为 16k 单声道 WAV"""
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            logger.info("未检测到 ffmpeg，无法转码为 WAV")
+            return None
+        base, _ext = os.path.splitext(file_path)
+        wav_path = base + ".wav"
+        cmd = [
+            ffmpeg,
+            "-y",
+            "-i", file_path,
+            "-ac", "1",
+            "-ar", "16000",
+            "-vn",
+            wav_path,
+        ]
+        try:
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            if result.returncode != 0:
+                err = (result.stderr or "").strip()
+                logger.warning(f"转码 WAV 失败: {err[:200]}")
+                return None
+            return wav_path
+        except Exception as e:
+            logger.warning(f"转码 WAV 异常: {e}")
+            return None
+
+    def _prepare_recognition_input(self, file_path: str) -> Optional[str]:
+        """按输入格式准备 Recognition 文件"""
+        fmt = (self.input_format or "pcm").lower()
+        if fmt == "wav":
+            return self._transcode_audio_to_wav(file_path)
+        return self._transcode_audio_to_pcm(file_path)
+
+    def _recognize_local_file(self, file_path: str) -> Optional[str]:
+        """使用 Recognition 直传本地音频"""
+        self._configure()
+        if not os.path.exists(file_path):
+            logger.warning(f"ASR 本地文件不存在: {file_path}")
+            return None
+
+        input_path = self._prepare_recognition_input(file_path)
+        if not input_path:
+            return None
+
+        try:
+            recognizer = Recognition(
+                model=self.model,
+                callback=None,
+                format=(self.input_format or "pcm"),
+                sample_rate=16000,
+            )
+            result = recognizer.call(input_path)
+            logger.info(
+                "ASR Recognition 结果: status_code={}, code={}, message={}, request_id={}",
+                getattr(result, "status_code", None),
+                getattr(result, "code", None),
+                getattr(result, "message", None),
+                getattr(result, "request_id", None),
+            )
+            sentences = result.get_sentence() or []
+            if isinstance(sentences, dict):
+                sentences = [sentences]
+            texts = []
+            for s in sentences:
+                if isinstance(s, dict):
+                    t = s.get("text") or ""
+                    if t:
+                        texts.append(t)
+            text = "\n".join(texts).strip() if texts else None
+            if text:
+                preview = text[:120].replace("\n", " ").strip()
+                logger.info(f"ASR Recognition 成功，长度={len(text)}，预览：{preview}")
+            return text
+        except Exception as e:
+            logger.warning(f"ASR Recognition 异常: {e}")
+            return None
+        finally:
+            for path in {file_path, input_path}:
+                try:
+                    if path and os.path.exists(path):
+                        os.remove(path)
+                except Exception:
+                    logger.debug(f"ASR 临时文件清理失败: {path}")
 
     def _download_transcription(self, url: str) -> Optional[str]:
         try:
@@ -275,18 +403,8 @@ class ASRService:
         return await asyncio.to_thread(self._transcribe_sync, audio_url)
 
     async def transcribe_local_file(self, file_path: str) -> Optional[str]:
-        """上传本地文件后进行转写（使用本地模型）"""
-        try:
-            oss_url = await asyncio.to_thread(self._upload_temp_file, file_path, self.local_model)
-            if not oss_url:
-                return None
-            return await asyncio.to_thread(self._transcribe_sync_with_model, oss_url, self.local_model)
-        finally:
-            try:
-                if os.path.exists(file_path):
-                    os.remove(file_path)
-            except Exception:
-                logger.debug(f"ASR 临时文件清理失败: {file_path}")
+        """本地文件直传识别（Recognition）"""
+        return await asyncio.to_thread(self._recognize_local_file, file_path)
 
     def _transcribe_sync_with_model(self, audio_url: str, model: str) -> Optional[str]:
         """使用指定模型转写（用于本地文件上传）"""
