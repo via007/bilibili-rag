@@ -305,7 +305,7 @@ async def _sync_folder(
             old_content = (cache.content or "").strip() if cache else ""
             old_source = cache.content_source if cache else None
 
-            needs_fetch = bvid in added or _should_refresh_cache(cache)
+            needs_fetch = _should_refresh_cache(cache)
             content = None
             should_update_cache = False
             should_reindex = False
