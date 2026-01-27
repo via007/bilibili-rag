@@ -428,7 +428,7 @@ async def run_once(bvid: str, cid: int | None = None, official_asr: bool = False
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="单视频 ASR 诊断脚本")
-    parser.add_argument("bvid", nargs="?", default="BV1gb4y1i7Rh", help="B站 BV 号")
+    parser.add_argument("bvid", nargs="?", default="BV1M7nyzGE6j", help="B站 BV 号")
     parser.add_argument("--cid", type=int, default=None, help="可选：指定 CID")
     parser.add_argument("--official-asr", action="store_true", help="仅用官方 SDK 进行 ASR 直测")
     parser.add_argument("--recognition-asr", action="store_true", help="使用 Recognition 直传音频（不走 OSS）")

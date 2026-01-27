@@ -44,7 +44,6 @@ class RAGService:
             )
             logger.info("使用 DashScopeEmbeddings 初始化成功")
         except ImportError:
-            logger.warning("未安装 dashscope/langchain_community，回退到 OpenAIEmbeddings")
             self.embeddings = OpenAIEmbeddings(
                 api_key=settings.openai_api_key,
                 base_url=settings.openai_base_url,
@@ -185,7 +184,9 @@ class RAGService:
         
         # 添加到向量库
         try:
-            self.vectorstore.add_documents(documents)
+            batch_size = 10
+            for idx in range(0, len(documents), batch_size):
+                self.vectorstore.add_documents(documents[idx:idx + batch_size])
             logger.info(f"[{video.bvid}] 添加了 {len(documents)} 个文档块")
         except Exception as e:
             logger.error(f"[{video.bvid}] 添加到向量库失败: {e}")

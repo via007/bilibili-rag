@@ -12,7 +12,7 @@ from sqlalchemy import select, func, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db, get_db_context
-from app.models import FavoriteFolder, FavoriteVideo, VideoCache, UserSession, ContentSource
+from app.models import FavoriteFolder, FavoriteVideo, VideoCache, UserSession, ContentSource, VideoContent
 from app.services.bilibili import BilibiliService
 from app.services.content_fetcher import ContentFetcher
 from app.services.asr import ASRService
@@ -271,6 +271,14 @@ async def _sync_folder(
             return True
         return False
 
+    def _is_asr_cache_usable(cache: Optional[VideoCache]) -> bool:
+        if not cache:
+            return False
+        if cache.content_source != ContentSource.ASR.value:
+            return False
+        text = (cache.content or "").strip()
+        return len(text) >= 50
+
     # 需要更新的已存在视频（缓存过少或来源较弱）
     update_candidates: set[str] = set()
     for bvid in current_bvids & existing_bvids:
@@ -329,15 +337,26 @@ async def _sync_folder(
             # 需要重建向量：新增/升级/内容变化 或 向量缺失
             if (global_count == 0) or should_reindex:
                 if not content:
-                    content = await content_fetcher.fetch_content(
-                        bvid, cid=meta["cid"], title=meta["title"]
-                    )
-                    if cache:
-                        cache.content = content.content
-                        cache.content_source = content.source.value
-                        cache.outline_json = content.outline
+                    if _is_asr_cache_usable(cache):
+                        content = VideoContent(
+                            bvid=bvid,
+                            title=meta["title"],
+                            content=(cache.content or "").strip(),
+                            source=ContentSource.ASR,
+                            outline=cache.outline_json,
+                        )
                         cache.is_processed = True
-                        logger.info(f"[{bvid}] 已写入缓存: source={cache.content_source}")
+                        logger.info(f"[{bvid}] 使用缓存 ASR 内容重建向量")
+                    else:
+                        content = await content_fetcher.fetch_content(
+                            bvid, cid=meta["cid"], title=meta["title"]
+                        )
+                        if cache:
+                            cache.content = content.content
+                            cache.content_source = content.source.value
+                            cache.outline_json = content.outline
+                            cache.is_processed = True
+                            logger.info(f"[{bvid}] 已写入缓存: source={cache.content_source}")
                 try:
                     rag.delete_video(bvid)
                 except Exception as e:
