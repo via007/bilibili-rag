@@ -137,9 +137,13 @@ class ASRService:
         if not input_path:
             return None
 
+        logger.info(
+            f"ASR Recognition 使用模型: {self.local_model or self.model}, format={self.input_format or 'pcm'}"
+        )
+
         try:
             recognizer = Recognition(
-                model=self.model,
+                model=self.local_model or self.model,
                 callback=None,
                 format=(self.input_format or "pcm"),
                 sample_rate=16000,

@@ -106,8 +106,13 @@ class ContentFetcher:
             if not audio_url:
                 logger.info(f"[{bvid}] 未获取到音频 URL")
                 return None
-            logger.info(f"[{bvid}] 使用 Recognition 直传（本地下载）")
-            text = await self._try_asr_with_local_audio(bvid, cid, audio_url)
+            status = await self._probe_audio_url(bvid, audio_url)
+            if status is not None and status < 400:
+                logger.info(f"[{bvid}] 音频 URL 可达，使用 Transcription")
+                text = await self.asr.transcribe_url(audio_url)
+            else:
+                logger.info(f"[{bvid}] 音频 URL 不可达，使用 Recognition 兜底")
+                text = await self._try_asr_with_local_audio(bvid, cid, audio_url)
 
             if not text or len(text) < 50:
                 logger.info(f"[{bvid}] ASR 内容过少")

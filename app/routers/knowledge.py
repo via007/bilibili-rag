@@ -291,6 +291,10 @@ async def _sync_folder(
 
     # 新增/更新向量与关联
     targets = list(added) + list(update_candidates)
+    total_targets = len(targets)
+    processed_targets = 0
+    if progress_callback:
+        progress_callback("准备处理", processed_targets, total_targets)
     for bvid in targets:
         meta = video_map[bvid]
         
@@ -378,8 +382,9 @@ async def _sync_folder(
             )
             if exists_row.scalar_one_or_none() is None:
                 db.add(FavoriteVideo(folder_id=folder.id, bvid=bvid, is_selected=True))
+            processed_targets += 1
             if progress_callback:
-                progress_callback(meta["title"])
+                progress_callback(meta["title"], processed_targets, total_targets)
         except Exception as e:
             logger.error(f"写入数据库失败 [{bvid}]: {e}")
 
@@ -589,7 +594,7 @@ async def build_knowledge_base(
         "status": "pending",
         "progress": 0,
         "current_step": "初始化中...",
-        "total_videos": len(request.folder_ids),
+        "total_videos": 0,
         "processed_videos": 0,
         "message": "",
     }
@@ -645,8 +650,16 @@ async def _build_knowledge_base_task(
                 for idx, folder_id in enumerate(folder_ids, start=1):
                     build_tasks[task_id]["current_step"] = f"同步收藏夹 {folder_id}"
 
-                    def progress_cb(title: str):
+                    def progress_cb(title: str, processed_count: int = 0, total_count: int = 0):
                         build_tasks[task_id]["current_step"] = f"处理: {title}"
+                        if total_count:
+                            build_tasks[task_id]["total_videos"] = total_count
+                        if processed_count:
+                            build_tasks[task_id]["processed_videos"] = processed_count
+                            if build_tasks[task_id]["total_videos"]:
+                                build_tasks[task_id]["progress"] = int(
+                                    (processed_count / build_tasks[task_id]["total_videos"]) * 100
+                                )
 
                     result = await _sync_folder(
                         db,
@@ -662,8 +675,6 @@ async def _build_knowledge_base_task(
                     processed = idx
                     total_added += result["added"]
                     total_removed += result["removed"]
-                    build_tasks[task_id]["processed_videos"] = processed
-                    build_tasks[task_id]["progress"] = int((processed / total_folders) * 100)
 
             build_tasks[task_id]["status"] = "completed"
             build_tasks[task_id]["progress"] = 100
