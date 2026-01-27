@@ -53,45 +53,11 @@ cp .env.example .env
 # 编辑 .env 文件，填入你的 DashScope API Key
 ```
 
-**.env 文件内容：**
-
-```env
-# OpenAI Compatible API (Alibaba Cloud DashScope)
-DASHSCOPE_API_KEY=sk-your-dashscope-api-key
-OPENAI_API_KEY=
-OPENAI_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-
-# Model Config
-LLM_MODEL=qwen3-max
-EMBEDDING_MODEL=text-embedding-v4
-
-# DashScope ASR
-DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/api/v1
-ASR_MODEL=fun-asr
-ASR_TIMEOUT=600
-
-# App Config
-APP_HOST=0.0.0.0
-APP_PORT=8000
-DEBUG=true
-
-# Database
-DATABASE_URL=sqlite+aiosqlite:///./data/bilibili_rag.db
-
-# ChromaDB
-CHROMA_PERSIST_DIRECTORY=./data/chroma_db
-```
-
 ## 🚀 启动
 
 ### 启动后端服务
 
 ```bash
-# 方式 1: 使用脚本
-chmod +x run_backend.sh
-./run_backend.sh
-
-# 方式 2: 直接运行
 conda activate bilibili-rag
 python -m uvicorn app.main:app --reload
 ```
@@ -101,11 +67,6 @@ python -m uvicorn app.main:app --reload
 ### 启动前端界面
 
 ```bash
-# 方式 1: 使用脚本
-chmod +x run_frontend.sh
-./run_frontend.sh
-
-# 方式 2: 手动启动
 cd frontend
 npm install
 npm run dev
@@ -165,11 +126,18 @@ bilibili-rag/
 │       ├── content_fetcher.py  # 内容获取
 │       ├── asr.py           # 音频转写（ASR）
 │       └── rag.py           # RAG 服务
+├── data/                    # 数据库与向量库数据
+├── logs/                    # 日志输出
+├── test/                    # 本地测试与样例
+|   ├── debug_asr_single.py  # 测试指定B站视频asr获取音频内容
+|   ├── diagnose_rag.py      # 测试向量检索
+|   ├── sync_cache_vectors.py# 同步数据库缓存到向量库
 ├── frontend/                # Next.js 前端
 │   ├── app/
 │   ├── components/
 │   └── lib/
 ├── requirements.txt         # Python 依赖
+├── .env                     # 本地环境变量
 ├── .env.example             # 环境变量示例
 ├── .gitignore
 └── README.md
