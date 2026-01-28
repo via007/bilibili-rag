@@ -156,6 +156,7 @@ class FavoriteFolderInfo(BaseModel):
     title: str
     media_count: int
     is_selected: bool = True
+    is_default: Optional[bool] = None
 
 
 class ChatRequest(BaseModel):

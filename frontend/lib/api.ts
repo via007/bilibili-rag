@@ -64,6 +64,7 @@ export interface FavoriteFolder {
     title: string;
     media_count: number;
     is_selected: boolean;
+    is_default?: boolean;
 }
 
 export interface Video {
@@ -83,6 +84,28 @@ export interface FavoriteVideosResponse {
     has_more: boolean;
     page: number;
     page_size: number;
+}
+
+export interface OrganizePreviewItem {
+    bvid: string;
+    title: string;
+    resource_id: number;
+    resource_type: number;
+    target_folder_id: number | null;
+    target_folder_title: string;
+    reason?: string;
+}
+
+export interface OrganizePreviewResponse {
+    default_folder_id: number;
+    default_folder_title: string;
+    folders: FavoriteFolder[];
+    items: OrganizePreviewItem[];
+    stats: {
+        total: number;
+        matched: number;
+        unmatched: number;
+    };
 }
 
 export interface BuildRequest {
@@ -172,6 +195,42 @@ export const favoritesApi = {
     getAllVideos: (mediaId: number, sessionId: string) =>
         request<{ total: number; videos: Video[] }>(
             `/favorites/${mediaId}/all-videos?session_id=${sessionId}`
+        ),
+
+    // 预览整理
+    organizePreview: (folderId: number, sessionId: string) =>
+        request<OrganizePreviewResponse>(
+            `/favorites/organize/preview?session_id=${sessionId}`,
+            {
+                method: "POST",
+                body: JSON.stringify({ folder_id: folderId }),
+            }
+        ),
+
+    // 执行整理
+    organizeExecute: (
+        data: {
+            default_folder_id: number;
+            moves: Array<{ resource_id: number; resource_type: number; target_folder_id: number }>;
+        },
+        sessionId: string
+    ) =>
+        request<{ message: string; moved: number; groups: number }>(
+            `/favorites/organize/execute?session_id=${sessionId}`,
+            {
+                method: "POST",
+                body: JSON.stringify(data),
+            }
+        ),
+
+    // 清理失效内容
+    cleanInvalid: (folderId: number, sessionId: string) =>
+        request<{ message: string; data: Record<string, unknown> }>(
+            `/favorites/organize/clean-invalid?session_id=${sessionId}`,
+            {
+                method: "POST",
+                body: JSON.stringify({ folder_id: folderId }),
+            }
         ),
 };
 

@@ -6,8 +6,9 @@ Bilibili RAG 知识库系统
 from fastapi import APIRouter, HTTPException, Depends
 from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.database import get_db
-from app.models import QRCodeResponse, LoginStatusResponse
+from sqlalchemy import select
+from app.database import get_db, get_db_context
+from app.models import QRCodeResponse, LoginStatusResponse, UserSession as UserSessionModel
 from app.services.bilibili import BilibiliService
 import uuid
 
@@ -139,14 +140,29 @@ async def get_session_info(session_id: str):
     获取会话信息
     """
     session = login_sessions.get(session_id)
-    
     if not session:
-        raise HTTPException(status_code=404, detail="会话不存在或已过期")
-    
-    return {
-        "valid": True,
-        "user_info": session.get("user_info")
-    }
+        async with get_db_context() as db:
+            result = await db.execute(
+                select(UserSessionModel).where(UserSessionModel.session_id == session_id)
+            )
+            db_session = result.scalar_one_or_none()
+        if not db_session or not db_session.is_valid:
+            raise HTTPException(status_code=404, detail="会话不存在或已过期")
+        session = {
+            "cookies": {
+                "SESSDATA": db_session.sessdata,
+                "bili_jct": db_session.bili_jct,
+                "DedeUserID": db_session.dedeuserid,
+            },
+            "user_info": {
+                "mid": db_session.bili_mid,
+                "uname": db_session.bili_uname,
+                "face": db_session.bili_face,
+            },
+        }
+        login_sessions[session_id] = session
+
+    return {"valid": True, "user_info": session.get("user_info")}
 
 
 @router.delete("/session/{session_id}")
@@ -160,8 +176,34 @@ async def logout(session_id: str):
     return {"message": "已退出登录"}
 
 
-def get_session(session_id: str) -> dict:
+async def get_session(session_id: str) -> dict:
     """
     获取会话信息（内部使用）
     """
-    return login_sessions.get(session_id)
+    session = login_sessions.get(session_id)
+    if session:
+        return session
+
+    async with get_db_context() as db:
+        result = await db.execute(
+            select(UserSessionModel).where(UserSessionModel.session_id == session_id)
+        )
+        db_session = result.scalar_one_or_none()
+        if not db_session or not db_session.is_valid:
+            return None
+        session = {
+            "cookies": {
+                "SESSDATA": db_session.sessdata,
+                "bili_jct": db_session.bili_jct,
+                "DedeUserID": db_session.dedeuserid,
+            },
+            "user_info": {
+                "mid": db_session.bili_mid,
+                "uname": db_session.bili_uname,
+                "face": db_session.bili_face,
+            },
+        }
+
+    if session:
+        login_sessions[session_id] = session
+    return session

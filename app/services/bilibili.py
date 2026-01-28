@@ -265,6 +265,57 @@ class BilibiliService:
             await asyncio.sleep(0.3)
         
         return all_videos
+
+    async def move_favorite_resources(
+        self,
+        src_media_id: int,
+        tar_media_id: int,
+        resources: List[str],
+    ) -> Dict[str, Any]:
+        """
+        批量移动收藏夹内容
+
+        Args:
+            src_media_id: 源收藏夹 ID
+            tar_media_id: 目标收藏夹 ID
+            resources: ["avid:type", ...]
+        """
+        if not self.bili_jct:
+            raise Exception("缺少 bili_jct，无法进行收藏夹移动")
+
+        if not resources:
+            return {"moved": 0}
+
+        url = f"{self.BASE_URL}/x/v3/fav/resource/move"
+        data = {
+            "src_media_id": src_media_id,
+            "tar_media_id": tar_media_id,
+            "resources": ",".join(resources),
+            "csrf": self.bili_jct,
+        }
+        if self.dedeuserid:
+            data["mid"] = self.dedeuserid
+
+        response = await self.client.post(url, data=data, cookies=self._get_cookies())
+        result = response.json()
+        if result.get("code") != 0:
+            raise Exception(f"移动收藏夹内容失败: {result.get('message')}")
+        return result.get("data") or {}
+
+    async def clean_favorite_resources(self, media_id: int) -> Dict[str, Any]:
+        """
+        清理收藏夹失效内容
+        """
+        if not self.bili_jct:
+            raise Exception("缺少 bili_jct，无法清理失效内容")
+
+        url = f"{self.BASE_URL}/x/v3/fav/resource/clean"
+        data = {"media_id": media_id, "csrf": self.bili_jct}
+        response = await self.client.post(url, data=data, cookies=self._get_cookies())
+        result = response.json()
+        if result.get("code") != 0:
+            raise Exception(f"清理失效内容失败: {result.get('message')}")
+        return result.get("data") or {}
     
     # ==================== 视频信息相关 ====================
     

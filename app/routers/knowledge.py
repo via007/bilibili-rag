@@ -520,7 +520,7 @@ async def sync_folders(
     db: AsyncSession = Depends(get_db),
 ):
     """同步收藏夹到向量库"""
-    session = get_session(session_id)
+    session = await get_session(session_id)
     if not session:
         raise HTTPException(status_code=401, detail="未登录或会话已过期")
 
@@ -583,7 +583,7 @@ async def build_knowledge_base(
     session_id: str = Query(..., description="会话ID"),
 ):
     """构建知识库（后台任务）"""
-    session = get_session(session_id)
+    session = await get_session(session_id)
     if not session:
         raise HTTPException(status_code=401, detail="未登录或会话已过期")
 

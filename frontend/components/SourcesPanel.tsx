@@ -8,7 +8,9 @@ import {
   knowledgeApi,
   BuildStatus,
   FolderStatus,
+  OrganizePreviewResponse,
 } from "@/lib/api";
+import OrganizePreviewModal from "@/components/OrganizePreviewModal";
 
 interface Props {
   sessionId: string;
@@ -24,6 +26,10 @@ export default function SourcesPanel({ sessionId, onBuildDone, onSelectionChange
   const [progress, setProgress] = useState<BuildStatus | null>(null);
   const [statusMap, setStatusMap] = useState<Record<number, FolderStatus>>({});
   const [message, setMessage] = useState<string | null>(null);
+  const [organizeOpen, setOrganizeOpen] = useState(false);
+  const [organizeLoading, setOrganizeLoading] = useState(false);
+  const [organizePreview, setOrganizePreview] = useState<OrganizePreviewResponse | null>(null);
+  const [organizeMessage, setOrganizeMessage] = useState<string | null>(null);
 
   // 加载收藏夹列表（从B站获取）
   const loadFolders = async () => {
@@ -68,6 +74,21 @@ export default function SourcesPanel({ sessionId, onBuildDone, onSelectionChange
     setMessage(null);
     await loadFolders();
     await loadStatuses();
+  };
+
+  const openOrganizePreview = async (folderId: number) => {
+    setOrganizeMessage(null);
+    setOrganizePreview(null);
+    setOrganizeOpen(true);
+    setOrganizeLoading(true);
+    try {
+      const res = await favoritesApi.organizePreview(folderId, sessionId);
+      setOrganizePreview(res);
+    } catch (e) {
+      setOrganizeMessage("预览失败，请稍后重试");
+    } finally {
+      setOrganizeLoading(false);
+    }
   };
 
   // 展开收藏夹查看视频
@@ -219,9 +240,25 @@ export default function SourcesPanel({ sessionId, onBuildDone, onSelectionChange
           <div className="panel-title">收藏夹</div>
           <div className="panel-subtitle">{folders.length} 个</div>
         </div>
-        <button onClick={refresh} className="btn btn-ghost" disabled={loading}>
-          {loading ? "加载中..." : "刷新"}
-        </button>
+        <div className="panel-actions">
+          <button
+            onClick={() => {
+              const def = folders.find((f) => f.is_default || f.title === "默认收藏夹");
+              if (def) {
+                openOrganizePreview(def.media_id);
+              } else {
+                setOrganizeMessage("未找到默认收藏夹");
+              }
+            }}
+            className="btn btn-ghost"
+            disabled={loading || organizeLoading}
+          >
+            {organizeLoading ? "整理中..." : "快速整理默认收藏夹"}
+          </button>
+          <button onClick={refresh} className="btn btn-ghost" disabled={loading}>
+            {loading ? "加载中..." : "刷新"}
+          </button>
+        </div>
       </div>
 
       <div className="panel-body">
@@ -301,6 +338,7 @@ export default function SourcesPanel({ sessionId, onBuildDone, onSelectionChange
 
         {/* 消息 */}
         {message && <div className="text-xs text-[var(--muted)] mb-3">{message}</div>}
+        {organizeMessage && <div className="text-xs text-[var(--muted)] mb-3">{organizeMessage}</div>}
 
         {/* 主按钮 */}
         <button
@@ -315,6 +353,16 @@ export default function SourcesPanel({ sessionId, onBuildDone, onSelectionChange
           入库后可在右侧进行问答
         </p>
       </div>
+
+      <OrganizePreviewModal
+        open={organizeOpen}
+        sessionId={sessionId}
+        preview={organizePreview}
+        loading={organizeLoading}
+        errorMessage={organizeMessage}
+        onClose={() => setOrganizeOpen(false)}
+        onApplied={refresh}
+      />
     </div>
   );
 }
