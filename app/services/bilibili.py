@@ -471,7 +471,24 @@ class BilibiliService:
         dash = payload.get("dash") or {}
         audio_list = dash.get("audio") or []
         if audio_list:
-            best = max(audio_list, key=lambda x: x.get("bandwidth", 0))
+            def _bw(item) -> int:
+                value = item.get("bandwidth") or item.get("bandWidth") or 0
+                try:
+                    return int(value)
+                except Exception:
+                    return 0
+
+            # 优先选择 <= 96kbps 的最高档，兼顾速度与识别效果；否则选最低带宽兜底
+            max_bw = 64_000
+            candidates = [a for a in audio_list if _bw(a) > 0]
+            if candidates:
+                preferred = [a for a in candidates if _bw(a) <= max_bw]
+                if preferred:
+                    best = max(preferred, key=_bw)
+                else:
+                    best = min(candidates, key=_bw)
+            else:
+                best = audio_list[0]
             return best.get("baseUrl") or best.get("base_url") or best.get("url")
 
         durl = payload.get("durl") or []
