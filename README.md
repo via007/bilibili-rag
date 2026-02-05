@@ -22,8 +22,8 @@
 ![首页截图](assets/screenshots/home.png)
 ![对话界面截图](assets/screenshots/chat.png)
 
-演示视频：
-[演示视频](assets/demo/demo.mp4)
+## B站演示视频：
+[演示视频](https://b23.tv/bGXyhjU)
 
 ---
 
