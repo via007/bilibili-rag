@@ -4,7 +4,10 @@ Bilibili RAG 知识库系统
 """
 import re
 import json
-from typing import List, Optional
+import anyio
+from datetime import datetime
+from typing import List, Optional, Tuple
+
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import StreamingResponse
 from loguru import logger
@@ -13,15 +16,63 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from openai import OpenAI
 from langchain.schema import Document
 
-from app.database import get_db
+from app.database import get_db, get_db_context
 from app.models import ChatRequest, ChatResponse, FavoriteFolder, FavoriteVideo, VideoCache, Conversation
 from app.config import settings
 from app.routers.knowledge import get_rag_service
 
 router = APIRouter(prefix="/chat", tags=["对话"])
 
-# 保留最近10条历史消息
 MAX_HISTORY_MESSAGES = 10
+
+
+async def _get_or_create_conversation(db: AsyncSession, request: ChatRequest) -> Tuple[int, Conversation]:
+    """获取或创建会话，返回 (conversation_id, conversation)"""
+    conversation_id: Optional[int] = request.conversation_id
+    conversation: Optional[Conversation] = None
+    if conversation_id is not None:
+        result = await db.execute(select(Conversation).where(Conversation.id == conversation_id))
+        conversation = result.scalar_one_or_none()
+    if conversation is None:
+        title = request.question.strip()[:50]
+        session_key = request.session_id or "anonymous"
+        conversation = Conversation(session_id=session_key, title=title, messages=[])
+        db.add(conversation)
+        await db.flush()
+        conversation_id = conversation.id
+    return conversation_id, conversation
+
+
+async def _do_append_turn(
+    session: AsyncSession, conversation_id: int, user_content: str, assistant_content: str
+) -> None:
+    """核心写入逻辑：追加一轮 user/assistant 对话到会话"""
+    result = await session.execute(select(Conversation).where(Conversation.id == conversation_id))
+    conv = result.scalar_one_or_none()
+    if conv is None:
+        return
+    now = datetime.utcnow().isoformat()
+    history = list(conv.messages or [])
+    history.append({"role": "user", "content": user_content, "timestamp": now})
+    history.append({"role": "assistant", "content": assistant_content, "timestamp": now})
+    conv.messages = history
+    await session.commit()
+
+
+async def _append_conversation_turn(
+    db: AsyncSession, conversation_id: int, user_content: str, assistant_content: str
+) -> None:
+    """向会话追加一轮对话（用于非流式接口，复用请求 session）"""
+    await _do_append_turn(db, conversation_id, user_content, assistant_content)
+
+
+async def _save_conversation_turn_standalone(
+    conversation_id: int, user_content: str, assistant_content: str
+) -> None:
+    """用独立会话保存一轮对话（用于流式接口，在 generator 内调用）"""
+    async with get_db_context() as session:
+        await _do_append_turn(session, conversation_id, user_content, assistant_content)
+
 
 def _get_llm_client() -> OpenAI:
     """获取 LLM 客户端"""
@@ -534,29 +585,7 @@ async def ask_question(request: ChatRequest, db: AsyncSession = Depends(get_db))
     if not request.question or not request.question.strip():
         raise HTTPException(status_code=400, detail="问题不能为空")
     try:
-        conversation_id: Optional[int] = request.conversation_id
-        conversation: Optional[Conversation] = None
-
-        # 按会话 ID 续接已有会话
-        if conversation_id is not None:
-            result = await db.execute(
-                select(Conversation).where(Conversation.id == conversation_id)
-            )
-            conversation = result.scalar_one_or_none()
-
-        # 如果没有找到，会新建一条会话记录
-        if conversation is None:
-            title = request.question.strip()[:50]
-            session_key = request.session_id or "anonymous"
-            conversation = Conversation(
-                session_id=session_key,
-                title=title,
-                messages=[],
-            )
-            db.add(conversation)
-            await db.flush()
-            conversation_id = conversation.id
-
+        conversation_id, conversation = await _get_or_create_conversation(db, request)
         messages, sources, _ = await _prepare_messages(request, db)
         client = _get_llm_client()
         response = client.chat.completions.create(
@@ -566,28 +595,8 @@ async def ask_question(request: ChatRequest, db: AsyncSession = Depends(get_db))
         )
         answer = response.choices[0].message.content or ""
 
-        # 记录本轮对话历史（仅非流式接口）
-        if conversation is not None:
-            from datetime import datetime
-
-            now = datetime.utcnow().isoformat()
-            history = list(conversation.messages or [])
-            history.append(
-                {
-                    "role": "user",
-                    "content": request.question,
-                    "timestamp": now,
-                }
-            )
-            history.append(
-                {
-                    "role": "assistant",
-                    "content": answer,
-                    "timestamp": now,
-                }
-            )
-            conversation.messages = history
-            await db.commit()
+        if conversation_id is not None:
+            await _append_conversation_turn(db, conversation_id, request.question, answer)
 
         return ChatResponse(
             answer=answer,
@@ -605,33 +614,14 @@ async def ask_question_stream(request: ChatRequest, db: AsyncSession = Depends(g
     if not request.question or not request.question.strip():
         raise HTTPException(status_code=400, detail="问题不能为空")
     try:
-        # 会话管理逻辑与 /chat/ask 保持一致，便于多轮对话
-        conversation_id: Optional[int] = request.conversation_id
-        conversation: Optional[Conversation] = None
-
-        if conversation_id is not None:
-            result = await db.execute(
-                select(Conversation).where(Conversation.id == conversation_id)
-            )
-            conversation = result.scalar_one_or_none()
-
-        if conversation is None:
-            title = request.question.strip()[:50]
-            session_key = request.session_id or "anonymous"
-            conversation = Conversation(
-                session_id=session_key,
-                title=title,
-                messages=[],
-            )
-            db.add(conversation)
-            await db.flush()
-            conversation_id = conversation.id
+        conversation_id, _ = await _get_or_create_conversation(db, request)
+        await db.commit()
 
         messages, sources, _ = await _prepare_messages(request, db)
         client = _get_llm_client()
+        question_text = request.question
 
         def generate():
-            # 累积完整回答内容，便于写入对话历史
             answer_parts: list[str] = []
             stream = client.chat.completions.create(
                 model=settings.llm_model,
@@ -645,40 +635,19 @@ async def ask_question_stream(request: ChatRequest, db: AsyncSession = Depends(g
                     answer_parts.append(delta.content)
                     yield delta.content
 
-            # 在流结束后写入对话历史
             answer = "".join(answer_parts)
-            if conversation is not None and answer:
-                from datetime import datetime
-
-                now = datetime.utcnow().isoformat()
-                history = list(conversation.messages or [])
-                history.append(
-                    {
-                        "role": "user",
-                        "content": request.question,
-                        "timestamp": now,
-                    }
-                )
-                history.append(
-                    {
-                        "role": "assistant",
-                        "content": answer,
-                        "timestamp": now,
-                    }
-                )
-                conversation.messages = history
-                # 使用独立事务提交，避免在流式生成器中抛出异常
+            if conversation_id is not None and answer:
                 try:
-                    import anyio  # type: ignore
-                    anyio.from_thread.run(db.commit)
+                    anyio.from_thread.run(
+                        _save_conversation_turn_standalone,
+                        conversation_id,
+                        question_text,
+                        answer,
+                    )
                 except Exception:
-                    # 出现提交问题时不影响主流程
                     logger.warning("流式对话历史写入失败", exc_info=True)
 
-            meta = {
-                "sources": sources,
-                "conversation_id": conversation_id,
-            }
+            meta = {"sources": sources, "conversation_id": conversation_id}
             yield f"\n[[SOURCES_JSON]]{json.dumps(meta, ensure_ascii=False)}"
 
         return StreamingResponse(generate(), media_type="text/plain; charset=utf-8")

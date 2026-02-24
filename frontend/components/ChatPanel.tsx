@@ -3,7 +3,9 @@
 import { useState, useRef, useEffect } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { chatApi, knowledgeApi, KnowledgeStats } from "@/lib/api";
+import { chatApi, knowledgeApi, KnowledgeStats, API_BASE_URL } from "@/lib/api";
+
+const STREAM_MARKER = "[[SOURCES_JSON]]";
 
 interface Message {
   id: string;
@@ -47,29 +49,78 @@ export default function ChatPanel({ statsKey, sessionId, folderIds }: Props) {
     ]);
     setLoading(true);
 
+    const updateAssistant = (content: string, sources?: Array<{ bvid: string; title: string; url: string }>) =>
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === assistantId ? { ...m, content, ...(sources !== undefined && { sources }) } : m
+        )
+      );
+
+    const setError = (msg: string) =>
+      updateAssistant(`错误: ${msg}`);
+
     try {
-      const res = await chatApi.ask(q, sessionId, folderIds, conversationId);
-      setConversationId(res.conversation_id ?? conversationId);
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === assistantId
-            ? { ...m, content: res.answer, sources: res.sources }
-            : m
-        )
-      );
-    } catch (err) {
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === assistantId
-            ? {
-                ...m,
-                content: `错误: ${
-                  err instanceof Error ? err.message : "请求失败"
-                }`,
+      const response = await fetch(`${API_BASE_URL}/chat/ask/stream`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          question: q,
+          session_id: sessionId,
+          folder_ids: folderIds,
+          conversation_id: conversationId ?? undefined,
+        }),
+      });
+
+      if (!response.ok || !response.body) {
+        throw new Error("流式接口不可用");
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder("utf-8");
+      let buffer = "";
+      let inMeta = false;
+      let metaJson = "";
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (value) {
+          const chunk = decoder.decode(value, { stream: !done });
+          if (chunk) {
+            if (inMeta) {
+              metaJson += chunk;
+            } else {
+              buffer += chunk;
+              const idx = buffer.indexOf(STREAM_MARKER);
+              if (idx !== -1) {
+                const contentPart = buffer.slice(0, idx);
+                metaJson = buffer.slice(idx + STREAM_MARKER.length);
+                buffer = contentPart;
+                inMeta = true;
               }
-            : m
-        )
-      );
+              updateAssistant(buffer.trim());
+            }
+          }
+        }
+        if (done) break;
+      }
+
+      if (metaJson) {
+        try {
+          const meta = JSON.parse(metaJson) as { sources?: Array<{ bvid: string; title: string; url: string }>; conversation_id?: number };
+          if (meta.conversation_id != null) setConversationId(meta.conversation_id);
+          if (Array.isArray(meta.sources)) updateAssistant(buffer.trim(), meta.sources);
+        } catch {
+          // 解析失败不影响主文本
+        }
+      }
+    } catch (err) {
+      try {
+        const res = await chatApi.ask(q, sessionId, folderIds, conversationId);
+        setConversationId(res.conversation_id ?? conversationId);
+        updateAssistant(res.answer, res.sources);
+      } catch (fallbackErr) {
+        setError(err instanceof Error ? err.message : "请求失败");
+      }
     }
     setLoading(false);
   };
