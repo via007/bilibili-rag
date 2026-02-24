@@ -14,11 +14,14 @@ from openai import OpenAI
 from langchain.schema import Document
 
 from app.database import get_db
-from app.models import ChatRequest, ChatResponse, FavoriteFolder, FavoriteVideo, VideoCache
+from app.models import ChatRequest, ChatResponse, FavoriteFolder, FavoriteVideo, VideoCache, Conversation
 from app.config import settings
 from app.routers.knowledge import get_rag_service
 
 router = APIRouter(prefix="/chat", tags=["对话"])
+
+# 保留最近10条历史消息
+MAX_HISTORY_MESSAGES = 10
 
 def _get_llm_client() -> OpenAI:
     """获取 LLM 客户端"""
@@ -134,6 +137,45 @@ def _build_db_summary_messages(context: str, question: str) -> list[dict]:
         {"role": "system", "content": system},
         {"role": "user", "content": question},
     ]
+
+
+def _merge_history_into_messages(base_messages: list[dict], history: List[dict]) -> list[dict]:
+    """
+    将历史对话插入到 LLM messages 中。
+    
+    规则：
+    - 历史只使用 role/content 字段，忽略其他元数据
+    - 最多保留 MAX_HISTORY_MESSAGES 条
+    - 如有 system 提示，则放在最前面，其次是历史消息，最后是当前用户问题
+    """
+    if not history:
+        return base_messages
+
+    # 规范化历史消息
+    normalized: List[dict] = []
+    for item in history:
+        role = item.get("role")
+        content = item.get("content")
+        if role in ("user", "assistant") and content:
+            normalized.append({"role": role, "content": content})
+
+    if not normalized:
+        return base_messages
+
+    # 只保留最近若干条
+    trimmed = normalized[-MAX_HISTORY_MESSAGES:]
+
+    if not base_messages:
+        return trimmed
+
+    first = base_messages[0]
+    if first.get("role") == "system":
+        # system 在最前面，其次历史，再是当前这轮的消息
+        rest = base_messages[1:]
+        return [first, *trimmed, *rest]
+
+    # 没有 system 提示时，直接把历史放在最前面
+    return [*trimmed, *base_messages]
 
 def _is_list_question(question: str) -> bool:
     """列表/清单类问题"""
@@ -382,6 +424,17 @@ async def _prepare_messages(request: ChatRequest, db: AsyncSession) -> tuple[lis
     question = request.question.strip()
     rag = get_rag_service()
     folder_ids = []
+    # 加载会话历史（如果有）
+    history_messages: List[dict] = []
+    if request.conversation_id:
+        result = await db.execute(
+            select(Conversation).where(Conversation.id == request.conversation_id)
+        )
+        conv = result.scalar_one_or_none()
+        if conv and conv.messages:
+            history = list(conv.messages)
+            history_messages = history[-MAX_HISTORY_MESSAGES:]
+
     if request.session_id:
         folder_ids = await _get_folder_ids_for_session(db, request.session_id, request.folder_ids)
         logger.info(f"Session: {request.session_id}, 关联 FolderIDs: {folder_ids}")
@@ -411,39 +464,46 @@ async def _prepare_messages(request: ChatRequest, db: AsyncSession) -> tuple[lis
             if not context:
                 context = "（暂无已入库的视频信息，请提醒用户可能需要先进行入库操作）"
             messages = _build_fallback_messages(context, question)
-            return messages, sources, question
+            return _merge_history_into_messages(messages, history_messages), sources, question
         messages = _build_direct_messages(question)
-        return messages, [], question
+        return _merge_history_into_messages(messages, history_messages), [], question
     # 3) 直接回答
     if route == "direct":
         title_context = await _get_video_titles_context(db, folder_ids, limit=50)
         messages = _build_direct_messages_with_context(title_context, question) if title_context else _build_direct_messages(question)
-        return messages, [], question
+        return _merge_history_into_messages(messages, history_messages), [], question
     # 4) 列表类问题
     if route == "db_list":
         if related is None:
             related = await _is_related_to_collection(db, folder_ids, question)
         if not related and not is_collection_intent:
-            return _build_direct_messages(question), [], question
+            messages = _build_direct_messages(question)
+            return _merge_history_into_messages(messages, history_messages), [], question
         context, sources = await _get_video_context(db, folder_ids, include_content=False, limit=50)
         if not context:
-            return _build_fallback_messages("（暂无信息，请入库）", question), sources, question
-        return _build_db_list_messages(context, question), sources, question
+            messages = _build_fallback_messages("（暂无信息，请入库）", question)
+            return _merge_history_into_messages(messages, history_messages), sources, question
+        messages = _build_db_list_messages(context, question)
+        return _merge_history_into_messages(messages, history_messages), sources, question
     # 5) 总结类问题
     if route == "db_content":
         if related is None:
             related = await _is_related_to_collection(db, folder_ids, question)
         if not related and not is_collection_intent:
-            return _build_direct_messages(question), [], question
+            messages = _build_direct_messages(question)
+            return _merge_history_into_messages(messages, history_messages), [], question
         context, sources = await _get_video_context(db, folder_ids, include_content=True, limit=None)
         if not context:
-            return _build_fallback_messages("（暂无信息，请入库）", question), sources, question
-        return _build_db_summary_messages(context, question), sources, question
+            messages = _build_fallback_messages("（暂无信息，请入库）", question)
+            return _merge_history_into_messages(messages, history_messages), sources, question
+        messages = _build_db_summary_messages(context, question)
+        return _merge_history_into_messages(messages, history_messages), sources, question
     # 6) 检查相关性
     if related is None:
         related = await _is_related_to_collection(db, folder_ids, question)
     if not related and not is_collection_intent:
-        return _build_direct_messages(question), [], question
+        messages = _build_direct_messages(question)
+        return _merge_history_into_messages(messages, history_messages), [], question
     # 7) 向量检索
     docs = []
     try:
@@ -456,14 +516,17 @@ async def _prepare_messages(request: ChatRequest, db: AsyncSession) -> tuple[lis
         context_parts, sources, seen_bvids = [], [], set()
         for doc in docs:
             bvid, title, content = doc.metadata.get("bvid", ""), doc.metadata.get("title", ""), doc.page_content.strip()
-            if content: context_parts.append(f"【{title}】\n{content}")
+            if content:
+                context_parts.append(f"【{title}】\n{content}")
             if bvid and bvid not in seen_bvids:
                 seen_bvids.add(bvid)
                 sources.append({"bvid": bvid, "title": title, "url": f"https://www.bilibili.com/video/{bvid}"})
-        return _build_rag_messages("\n\n---\n\n".join(context_parts), question), sources, question
+        messages = _build_rag_messages("\n\n---\n\n".join(context_parts), question)
+        return _merge_history_into_messages(messages, history_messages), sources, question
     # 兜底
     context, sources = await _get_video_context(db, folder_ids, include_content=False, limit=50)
-    return _build_fallback_messages(context or "（暂无入库信息）", question), sources, question
+    messages = _build_fallback_messages(context or "（暂无入库信息）", question)
+    return _merge_history_into_messages(messages, history_messages), sources, question
 
 @router.post("/ask", response_model=ChatResponse)
 async def ask_question(request: ChatRequest, db: AsyncSession = Depends(get_db)):
@@ -471,10 +534,66 @@ async def ask_question(request: ChatRequest, db: AsyncSession = Depends(get_db))
     if not request.question or not request.question.strip():
         raise HTTPException(status_code=400, detail="问题不能为空")
     try:
+        conversation_id: Optional[int] = request.conversation_id
+        conversation: Optional[Conversation] = None
+
+        # 按会话 ID 续接已有会话
+        if conversation_id is not None:
+            result = await db.execute(
+                select(Conversation).where(Conversation.id == conversation_id)
+            )
+            conversation = result.scalar_one_or_none()
+
+        # 如果没有找到，会新建一条会话记录
+        if conversation is None:
+            title = request.question.strip()[:50]
+            session_key = request.session_id or "anonymous"
+            conversation = Conversation(
+                session_id=session_key,
+                title=title,
+                messages=[],
+            )
+            db.add(conversation)
+            await db.flush()
+            conversation_id = conversation.id
+
         messages, sources, _ = await _prepare_messages(request, db)
         client = _get_llm_client()
-        response = client.chat.completions.create(model=settings.llm_model, messages=messages, temperature=0.5)
-        return ChatResponse(answer=response.choices[0].message.content or "", sources=sources[:5])
+        response = client.chat.completions.create(
+            model=settings.llm_model,
+            messages=messages,
+            temperature=0.5,
+        )
+        answer = response.choices[0].message.content or ""
+
+        # 记录本轮对话历史（仅非流式接口）
+        if conversation is not None:
+            from datetime import datetime
+
+            now = datetime.utcnow().isoformat()
+            history = list(conversation.messages or [])
+            history.append(
+                {
+                    "role": "user",
+                    "content": request.question,
+                    "timestamp": now,
+                }
+            )
+            history.append(
+                {
+                    "role": "assistant",
+                    "content": answer,
+                    "timestamp": now,
+                }
+            )
+            conversation.messages = history
+            await db.commit()
+
+        return ChatResponse(
+            answer=answer,
+            sources=sources[:5],
+            conversation_id=conversation_id,
+        )
     except HTTPException: raise
     except Exception as e:
         logger.error(f"问答失败: {e}")
@@ -486,14 +605,82 @@ async def ask_question_stream(request: ChatRequest, db: AsyncSession = Depends(g
     if not request.question or not request.question.strip():
         raise HTTPException(status_code=400, detail="问题不能为空")
     try:
+        # 会话管理逻辑与 /chat/ask 保持一致，便于多轮对话
+        conversation_id: Optional[int] = request.conversation_id
+        conversation: Optional[Conversation] = None
+
+        if conversation_id is not None:
+            result = await db.execute(
+                select(Conversation).where(Conversation.id == conversation_id)
+            )
+            conversation = result.scalar_one_or_none()
+
+        if conversation is None:
+            title = request.question.strip()[:50]
+            session_key = request.session_id or "anonymous"
+            conversation = Conversation(
+                session_id=session_key,
+                title=title,
+                messages=[],
+            )
+            db.add(conversation)
+            await db.flush()
+            conversation_id = conversation.id
+
         messages, sources, _ = await _prepare_messages(request, db)
         client = _get_llm_client()
+
         def generate():
-            stream = client.chat.completions.create(model=settings.llm_model, messages=messages, temperature=0.5, stream=True)
+            # 累积完整回答内容，便于写入对话历史
+            answer_parts: list[str] = []
+            stream = client.chat.completions.create(
+                model=settings.llm_model,
+                messages=messages,
+                temperature=0.5,
+                stream=True,
+            )
             for chunk in stream:
                 delta = chunk.choices[0].delta
-                if delta and delta.content: yield delta.content
-            yield f"\n[[SOURCES_JSON]]{json.dumps(sources, ensure_ascii=False)}"
+                if delta and delta.content:
+                    answer_parts.append(delta.content)
+                    yield delta.content
+
+            # 在流结束后写入对话历史
+            answer = "".join(answer_parts)
+            if conversation is not None and answer:
+                from datetime import datetime
+
+                now = datetime.utcnow().isoformat()
+                history = list(conversation.messages or [])
+                history.append(
+                    {
+                        "role": "user",
+                        "content": request.question,
+                        "timestamp": now,
+                    }
+                )
+                history.append(
+                    {
+                        "role": "assistant",
+                        "content": answer,
+                        "timestamp": now,
+                    }
+                )
+                conversation.messages = history
+                # 使用独立事务提交，避免在流式生成器中抛出异常
+                try:
+                    import anyio  # type: ignore
+                    anyio.from_thread.run(db.commit)
+                except Exception:
+                    # 出现提交问题时不影响主流程
+                    logger.warning("流式对话历史写入失败", exc_info=True)
+
+            meta = {
+                "sources": sources,
+                "conversation_id": conversation_id,
+            }
+            yield f"\n[[SOURCES_JSON]]{json.dumps(meta, ensure_ascii=False)}"
+
         return StreamingResponse(generate(), media_type="text/plain; charset=utf-8")
     except HTTPException: raise
     except Exception as e:

@@ -3,7 +3,7 @@
 import { useState, useRef, useEffect } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { chatApi, knowledgeApi, KnowledgeStats, API_BASE_URL } from "@/lib/api";
+import { chatApi, knowledgeApi, KnowledgeStats } from "@/lib/api";
 
 interface Message {
   id: string;
@@ -23,8 +23,8 @@ export default function ChatPanel({ statsKey, sessionId, folderIds }: Props) {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [stats, setStats] = useState<KnowledgeStats | null>(null);
+  const [conversationId, setConversationId] = useState<number | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
-  const marker = "[[SOURCES_JSON]]";
 
   useEffect(() => {
     knowledgeApi.getStats().then(setStats).catch(() => { });
@@ -48,90 +48,28 @@ export default function ChatPanel({ statsKey, sessionId, folderIds }: Props) {
     setLoading(true);
 
     try {
-      const response = await fetch(`${API_BASE_URL}/chat/ask/stream`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          question: q,
-          session_id: sessionId,
-          folder_ids: folderIds,
-        }),
-      });
-
-      if (!response.ok || !response.body) {
-        throw new Error("流式接口不可用");
-      }
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder("utf-8");
-      let done = false;
-      let buffer = "";
-      let sourcesJson = "";
-      let inSources = false;
-
-      while (!done) {
-        const { value, done: doneReading } = await reader.read();
-        done = doneReading;
-        if (value) {
-          const chunk = decoder.decode(value, { stream: !done });
-          if (chunk) {
-            if (inSources) {
-              sourcesJson += chunk;
-            } else {
-              buffer += chunk;
-              const markerIndex = buffer.indexOf(marker);
-              if (markerIndex !== -1) {
-                const contentPart = buffer.slice(0, markerIndex);
-                sourcesJson = buffer.slice(markerIndex + marker.length);
-                buffer = contentPart;
-                inSources = true;
+      const res = await chatApi.ask(q, sessionId, folderIds, conversationId);
+      setConversationId(res.conversation_id ?? conversationId);
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === assistantId
+            ? { ...m, content: res.answer, sources: res.sources }
+            : m
+        )
+      );
+    } catch (err) {
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === assistantId
+            ? {
+                ...m,
+                content: `错误: ${
+                  err instanceof Error ? err.message : "请求失败"
+                }`,
               }
-              setMessages((prev) =>
-                prev.map((m) =>
-                  m.id === assistantId ? { ...m, content: buffer } : m
-                )
-              );
-            }
-          }
-        }
-      }
-
-      if (sourcesJson) {
-        try {
-          const parsed = JSON.parse(sourcesJson);
-          if (Array.isArray(parsed)) {
-            setMessages((prev) =>
-              prev.map((m) =>
-                m.id === assistantId ? { ...m, sources: parsed } : m
-              )
-            );
-          }
-        } catch {
-          // 忽略解析错误，避免影响主文本
-        }
-      }
-    } catch (e) {
-      try {
-        const res = await chatApi.ask(q, sessionId, folderIds);
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.id === assistantId ? { ...m, content: res.answer, sources: res.sources } : m
-          )
-        );
-      } catch (err) {
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.id === assistantId
-              ? {
-                  ...m,
-                  content: `错误: ${err instanceof Error ? err.message : "请求失败"}`,
-                }
-              : m
-          )
-        );
-      }
+            : m
+        )
+      );
     }
     setLoading(false);
   };
@@ -146,7 +84,14 @@ export default function ChatPanel({ statsKey, sessionId, folderIds }: Props) {
           )}
         </div>
         {messages.length > 0 && (
-          <button onClick={() => setMessages([])} className="btn btn-ghost" title="清空">
+          <button
+            onClick={() => {
+              setMessages([]);
+              setConversationId(null);
+            }}
+            className="btn btn-ghost"
+            title="清空"
+          >
             清空对话
           </button>
         )}
