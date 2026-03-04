@@ -104,13 +104,33 @@ export default function ChatPanel({ statsKey, sessionId, folderIds }: Props) {
         if (done) break;
       }
 
+      const remain = decoder.decode();
+      if (remain) {
+        if (inMeta) {
+          metaJson += remain;
+        } else {
+          buffer += remain;
+          updateAssistant(buffer.trim());
+        }
+      }
+
       if (metaJson) {
         try {
-          const meta = JSON.parse(metaJson) as { sources?: Array<{ bvid: string; title: string; url: string }>; conversation_id?: number };
-          if (meta.conversation_id != null) setConversationId(meta.conversation_id);
-          if (Array.isArray(meta.sources)) updateAssistant(buffer.trim(), meta.sources);
-        } catch {
-          // 解析失败不影响主文本
+          const parsed = JSON.parse(metaJson) as
+            | Array<{ bvid: string; title: string; url: string }>
+            | {
+                sources?: Array<{ bvid: string; title: string; url: string }>;
+                conversation_id?: number;
+              };
+          if (Array.isArray(parsed)) {
+            updateAssistant(buffer.trim(), parsed);
+          } else {
+            if (parsed.conversation_id != null) setConversationId(parsed.conversation_id);
+            if (Array.isArray(parsed.sources)) updateAssistant(buffer.trim(), parsed.sources);
+          }
+        } catch (parseErr) {
+          // 不阻断主文本，但保留调试信息，便于定位流式尾包解析问题
+          console.warn("流式尾包解析失败", parseErr, metaJson);
         }
       }
     } catch (err) {
