@@ -5,6 +5,8 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { chatApi, knowledgeApi, KnowledgeStats, API_BASE_URL } from "@/lib/api";
 
+const STREAM_MARKER = "[[SOURCES_JSON]]";
+
 interface Message {
   id: string;
   role: "user" | "assistant";
@@ -23,8 +25,8 @@ export default function ChatPanel({ statsKey, sessionId, folderIds }: Props) {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [stats, setStats] = useState<KnowledgeStats | null>(null);
+  const [conversationId, setConversationId] = useState<number | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
-  const marker = "[[SOURCES_JSON]]";
 
   useEffect(() => {
     knowledgeApi.getStats().then(setStats).catch(() => { });
@@ -47,16 +49,25 @@ export default function ChatPanel({ statsKey, sessionId, folderIds }: Props) {
     ]);
     setLoading(true);
 
+    const updateAssistant = (content: string, sources?: Array<{ bvid: string; title: string; url: string }>) =>
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === assistantId ? { ...m, content, ...(sources !== undefined && { sources }) } : m
+        )
+      );
+
+    const setError = (msg: string) =>
+      updateAssistant(`错误: ${msg}`);
+
     try {
       const response = await fetch(`${API_BASE_URL}/chat/ask/stream`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           question: q,
           session_id: sessionId,
           folder_ids: folderIds,
+          conversation_id: conversationId ?? undefined,
         }),
       });
 
@@ -66,71 +77,69 @@ export default function ChatPanel({ statsKey, sessionId, folderIds }: Props) {
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder("utf-8");
-      let done = false;
       let buffer = "";
-      let sourcesJson = "";
-      let inSources = false;
+      let inMeta = false;
+      let metaJson = "";
 
-      while (!done) {
-        const { value, done: doneReading } = await reader.read();
-        done = doneReading;
+      while (true) {
+        const { value, done } = await reader.read();
         if (value) {
           const chunk = decoder.decode(value, { stream: !done });
           if (chunk) {
-            if (inSources) {
-              sourcesJson += chunk;
+            if (inMeta) {
+              metaJson += chunk;
             } else {
               buffer += chunk;
-              const markerIndex = buffer.indexOf(marker);
-              if (markerIndex !== -1) {
-                const contentPart = buffer.slice(0, markerIndex);
-                sourcesJson = buffer.slice(markerIndex + marker.length);
+              const idx = buffer.indexOf(STREAM_MARKER);
+              if (idx !== -1) {
+                const contentPart = buffer.slice(0, idx);
+                metaJson = buffer.slice(idx + STREAM_MARKER.length);
                 buffer = contentPart;
-                inSources = true;
+                inMeta = true;
               }
-              setMessages((prev) =>
-                prev.map((m) =>
-                  m.id === assistantId ? { ...m, content: buffer } : m
-                )
-              );
+              updateAssistant(buffer.trim());
             }
           }
         }
+        if (done) break;
       }
 
-      if (sourcesJson) {
-        try {
-          const parsed = JSON.parse(sourcesJson);
-          if (Array.isArray(parsed)) {
-            setMessages((prev) =>
-              prev.map((m) =>
-                m.id === assistantId ? { ...m, sources: parsed } : m
-              )
-            );
-          }
-        } catch {
-          // 忽略解析错误，避免影响主文本
+      const remain = decoder.decode();
+      if (remain) {
+        if (inMeta) {
+          metaJson += remain;
+        } else {
+          buffer += remain;
+          updateAssistant(buffer.trim());
         }
       }
-    } catch (e) {
+
+      if (metaJson) {
+        try {
+          const parsed = JSON.parse(metaJson) as
+            | Array<{ bvid: string; title: string; url: string }>
+            | {
+                sources?: Array<{ bvid: string; title: string; url: string }>;
+                conversation_id?: number;
+              };
+          if (Array.isArray(parsed)) {
+            updateAssistant(buffer.trim(), parsed);
+          } else {
+            if (parsed.conversation_id != null) setConversationId(parsed.conversation_id);
+            if (Array.isArray(parsed.sources)) updateAssistant(buffer.trim(), parsed.sources);
+          }
+        } catch (parseErr) {
+          // 不阻断主文本，但保留调试信息，便于定位流式尾包解析问题
+          console.warn("流式尾包解析失败", parseErr, metaJson);
+        }
+      }
+    } catch (err) {
       try {
-        const res = await chatApi.ask(q, sessionId, folderIds);
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.id === assistantId ? { ...m, content: res.answer, sources: res.sources } : m
-          )
-        );
-      } catch (err) {
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.id === assistantId
-              ? {
-                  ...m,
-                  content: `错误: ${err instanceof Error ? err.message : "请求失败"}`,
-                }
-              : m
-          )
-        );
+        const res = await chatApi.ask(q, sessionId, folderIds, conversationId);
+        setConversationId(res.conversation_id ?? conversationId);
+        updateAssistant(res.answer, res.sources);
+      } catch (fallbackErr) {
+        setError(err instanceof Error ? err.message : "请求失败");
       }
     }
     setLoading(false);
@@ -146,7 +155,14 @@ export default function ChatPanel({ statsKey, sessionId, folderIds }: Props) {
           )}
         </div>
         {messages.length > 0 && (
-          <button onClick={() => setMessages([])} className="btn btn-ghost" title="清空">
+          <button
+            onClick={() => {
+              setMessages([]);
+              setConversationId(null);
+            }}
+            className="btn btn-ghost"
+            title="清空"
+          >
             清空对话
           </button>
         )}

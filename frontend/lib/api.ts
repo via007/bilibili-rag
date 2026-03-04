@@ -157,6 +157,7 @@ export interface ChatResponse {
         title: string;
         url: string;
     }>;
+    conversation_id?: number;
 }
 
 // ==================== API 函数 ====================
@@ -279,10 +280,15 @@ export const knowledgeApi = {
 // 对话相关
 export const chatApi = {
     // 提问
-    ask: (question: string, sessionId?: string, folderIds?: number[]) =>
+    ask: (question: string, sessionId?: string, folderIds?: number[], conversationId?: number | null) =>
         request<ChatResponse>("/chat/ask", {
             method: "POST",
-            body: JSON.stringify({ question, session_id: sessionId, folder_ids: folderIds }),
+            body: JSON.stringify({
+                question,
+                session_id: sessionId,
+                folder_ids: folderIds,
+                conversation_id: conversationId ?? undefined,
+            }),
         }),
 
     // 搜索
