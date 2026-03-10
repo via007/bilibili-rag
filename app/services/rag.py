@@ -127,9 +127,9 @@ class RAGService:
         Returns:
             添加的文档块数量
         """
-        # 构建完整内容
+        # 构建完整内容（正文不带标题，避免标题相似度主导召回）
         title = video.title or "未知标题"
-        content_parts = [f"# {title}"]
+        content_parts: List[str] = []
         
         if video.content and video.content.strip():
             content_parts.append(video.content.strip())
@@ -147,7 +147,7 @@ class RAGService:
             if outline_text.strip() != "## 内容提纲":
                 content_parts.append(outline_text)
         
-        full_content = "\n\n".join(content_parts)
+        full_content = "\n\n".join(content_parts).strip()
         
         # 验证内容不为空
         if not full_content or len(full_content.strip()) < 10:
