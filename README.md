@@ -74,6 +74,46 @@ npm run dev
 
 ---
 
+## 🤖 OpenClaw Skill（本地接入）
+
+本仓库已提供一个可直接使用的 Skill：`skills/bilibili-rag-local/SKILL.md`。  
+作用：把本地运行的 `bilibili-rag` 服务接入 OpenClaw，让 OpenClaw 直接调用你的收藏夹知识库进行检索和问答。
+
+### 前置条件
+
+1. 先按上面的步骤完成本项目本地部署。  
+2. 确认后端接口可访问：`http://127.0.0.1:8000/docs`。  
+3. 确认 OpenClaw 已安装并可加载本地 Skills。  
+
+### 接入方式
+
+1. 将本仓库中的 `skills/bilibili-rag-local` 放到 OpenClaw 的 Skills 目录（例如 `~/.openclaw/skills/`）。  
+2. 重启或刷新 OpenClaw Skills。  
+3. 在 OpenClaw 中调用该 Skill，让它通过本地 API 执行：  
+   - `POST /chat/ask`（问答）  
+   - `POST /chat/search`（检索片段）  
+   - `GET /knowledge/folders/status`（入库状态）  
+
+### 使用建议
+
+1. 先同步/入库收藏夹，再进行问答。  
+2. 问题越具体，召回效果越好。  
+3. 若出现“无命中”，优先检查是否完成入库或是否选错收藏夹。  
+
+---
+
+## 🧩 基于 Skill 的扩展示例
+
+你可以在 `skills/` 目录继续开发更多 Skill，把收藏夹真正变成可持续运营的知识系统。  
+例如结合 OpenClaw 的定时能力（Cron）做自动化：
+
+1. 每日/每周统计收藏夹入库状态（新增、未入库、失败项）。  
+2. 定时生成“新增收藏学习摘要”（按主题聚合要点）。  
+3. 定时输出“待补全内容清单”（ASR 失败、内容过短、召回弱视频）。  
+4. 将统计结果自动推送到你常用的消息渠道，形成固定复盘节奏。  
+
+---
+
 ## 🧪 测试与诊断脚本
 
 > 注意：`test/` 目录下的脚本需要 **移动到项目根目录** 再运行（依赖相对路径与配置）。
@@ -126,6 +166,7 @@ bilibili-rag/
 ├── app/                # 后端逻辑
 ├── frontend/           # 前端界面
 ├── data/               # 数据库与向量库
+├── skills/             # OpenClaw Skills（含 bilibili-rag-local）
 ├── test/               # 测试脚本（需移动到根目录再运行）
 └── README.md
 ```
