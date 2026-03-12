@@ -20,6 +20,35 @@ from app.routers.knowledge import get_rag_service
 
 router = APIRouter(prefix="/chat", tags=["对话"])
 
+
+def _log_llm_usage(scene: str, response) -> None:
+    """记录 LLM 用量与预估费用。"""
+    usage = getattr(response, "usage", None)
+    if not usage:
+        logger.info(f"LLM用量[{scene}]：未返回 usage 信息")
+        return
+
+    prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+    completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+    total_tokens = int(getattr(usage, "total_tokens", prompt_tokens + completion_tokens) or 0)
+
+    input_cost = (prompt_tokens / 1_000_000) * settings.llm_input_price_per_1m
+    output_cost = (completion_tokens / 1_000_000) * settings.llm_output_price_per_1m
+    total_cost = input_cost + output_cost
+
+    logger.info(
+        "LLM用量[{}] model={} prompt_tokens={} completion_tokens={} total_tokens={} "
+        "cost_input={:.6f} cost_output={:.6f} cost_total={:.6f}",
+        scene,
+        settings.llm_model,
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+        input_cost,
+        output_cost,
+        total_cost,
+    )
+
 def _get_llm_client() -> OpenAI:
     """获取 LLM 客户端"""
     if not settings.openai_api_key:
@@ -200,6 +229,7 @@ def _route_with_llm(question: str) -> tuple[Optional[str], str]:
             ],
             temperature=0,
         )
+        _log_llm_usage("route", resp)
         text = (resp.choices[0].message.content or "").strip()
         match = re.search(r"(direct|db_list|db_content|vector)", text)
         return (match.group(1) if match else None), text
@@ -474,6 +504,7 @@ async def ask_question(request: ChatRequest, db: AsyncSession = Depends(get_db))
         messages, sources, _ = await _prepare_messages(request, db)
         client = _get_llm_client()
         response = client.chat.completions.create(model=settings.llm_model, messages=messages, temperature=0.5)
+        _log_llm_usage("ask", response)
         return ChatResponse(answer=response.choices[0].message.content or "", sources=sources[:5])
     except HTTPException: raise
     except Exception as e:

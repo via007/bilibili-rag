@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     openai_base_url: str = Field(default="https://api.openai.com/v1", env="OPENAI_BASE_URL")
     llm_model: str = Field(default="gpt-4-turbo", env="LLM_MODEL")
     embedding_model: str = Field(default="text-embedding-3-small", env="EMBEDDING_MODEL")
+    llm_input_price_per_1m: float = Field(default=0.0, env="LLM_INPUT_PRICE_PER_1M")
+    llm_output_price_per_1m: float = Field(default=0.0, env="LLM_OUTPUT_PRICE_PER_1M")
 
     # DashScope ASR
     dashscope_base_url: str = Field(
