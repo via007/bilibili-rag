@@ -4,6 +4,7 @@ Bilibili RAG 知识库系统
 """
 import re
 import json
+from decimal import Decimal, ROUND_HALF_UP
 from typing import List, Optional
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import StreamingResponse
@@ -21,23 +22,21 @@ from app.routers.knowledge import get_rag_service
 router = APIRouter(prefix="/chat", tags=["对话"])
 
 
-def _resolve_model_prices(model_name: str) -> tuple[float, float, str]:
+def _resolve_model_prices(model_name: str) -> tuple[Decimal, Decimal, str]:
     """按模型解析单价，未配置时按 0 计费并标记缺失。"""
-    try:
-        price_map = json.loads(settings.llm_model_prices_json or "{}")
-    except Exception:
-        price_map = {}
-
-    model_cfg = price_map.get(model_name)
+    model_cfg = settings.llm_model_prices.get(model_name)
     if isinstance(model_cfg, dict):
-        input_price = model_cfg.get("input_per_1m", model_cfg.get("input", 0))
-        output_price = model_cfg.get("output_per_1m", model_cfg.get("output", 0))
-        try:
-            return float(input_price), float(output_price), "model_specific"
-        except Exception:
-            pass
+        input_price = model_cfg.get("input", Decimal("0"))
+        output_price = model_cfg.get("output", Decimal("0"))
+        if isinstance(input_price, Decimal) and isinstance(output_price, Decimal):
+            return input_price, output_price, "model_specific"
 
-    return 0.0, 0.0, "model_price_missing"
+    return Decimal("0"), Decimal("0"), "model_price_missing"
+
+
+def _fmt_decimal(value: Decimal) -> str:
+    """统一格式化金额和单价，避免科学计数法。"""
+    return str(value.quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP))
 
 
 def _log_llm_usage(scene: str, response) -> None:
@@ -53,25 +52,25 @@ def _log_llm_usage(scene: str, response) -> None:
     model_name = getattr(response, "model", None) or settings.llm_model
     input_price, output_price, price_source = _resolve_model_prices(model_name)
 
-    input_cost = (prompt_tokens / 1_000_000) * input_price
-    output_cost = (completion_tokens / 1_000_000) * output_price
+    input_cost = (Decimal(prompt_tokens) / Decimal("1000000")) * input_price
+    output_cost = (Decimal(completion_tokens) / Decimal("1000000")) * output_price
     total_cost = input_cost + output_cost
 
     logger.info(
         "LLM用量[{}] model={} prompt_tokens={} completion_tokens={} total_tokens={} "
-        "price_source={} price_input_per_1m={:.6f} price_output_per_1m={:.6f} "
-        "cost_input={:.6f} cost_output={:.6f} cost_total={:.6f}",
+        "price_source={} price_input_per_1m={} price_output_per_1m={} "
+        "cost_input={} cost_output={} cost_total={}",
         scene,
         model_name,
         prompt_tokens,
         completion_tokens,
         total_tokens,
         price_source,
-        input_price,
-        output_price,
-        input_cost,
-        output_cost,
-        total_cost,
+        _fmt_decimal(input_price),
+        _fmt_decimal(output_price),
+        _fmt_decimal(input_cost),
+        _fmt_decimal(output_cost),
+        _fmt_decimal(total_cost),
     )
 
 def _get_llm_client() -> OpenAI:
