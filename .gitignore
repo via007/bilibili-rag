@@ -10,7 +10,6 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
 lib64/
 parts/
 sdist/
@@ -19,6 +18,7 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+.pytest_cache
 
 # 虚拟环境
 venv/
@@ -60,3 +60,15 @@ logs/
 node_modules/
 package-lock.json
 frontend/package-lock.json
+
+#claude code
+.claude/
+plan/
+CLAUDE.md
+Todo.md
+issue.md
+OK.md
+review.md
+
+# git
+git-change.md
