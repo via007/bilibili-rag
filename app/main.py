@@ -11,7 +11,7 @@ import sys
 
 from app.config import settings, ensure_directories
 from app.database import init_db
-from app.routers import auth, favorites, knowledge, chat
+from app.routers import auth, favorites, knowledge, chat, conversation, correction, config, summary, clustering, learning_path, export
 
 
 # 配置日志
@@ -33,15 +33,15 @@ logger.add(
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
     # 启动时
-    logger.info("🚀 Bilibili RAG 知识库系统启动中...")
+    logger.info("Bilibili RAG 知识库系统启动中...")
     ensure_directories()
     await init_db()
-    logger.info("✅ 数据库初始化完成")
-    
+    logger.info("数据库初始化完成")
+
     yield
-    
+
     # 关闭时
-    logger.info("👋 应用关闭")
+    logger.info("应用关闭")
 
 
 # 创建 FastAPI 应用
@@ -85,13 +85,20 @@ app.include_router(auth.router)
 app.include_router(favorites.router)
 app.include_router(knowledge.router)
 app.include_router(chat.router)
+app.include_router(conversation.router)
+app.include_router(correction.router)
+app.include_router(config.router)
+app.include_router(summary.router)
+app.include_router(clustering.router)
+app.include_router(learning_path.router)
+app.include_router(export.router)
 
 
 @app.get("/")
 async def root():
     """API 根路径"""
     return {
-        "message": "🎬 Bilibili RAG 知识库系统",
+        "message": "Bilibili RAG 知识库系统",
         "version": "0.1.0",
         "docs": "/docs",
         "status": "running"
