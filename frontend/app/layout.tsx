@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { ZCOOL_XiaoWei, Noto_Sans_SC } from "next/font/google";
 import "./globals.css";
+import { Providers } from "@/components/Providers";
 
 const display = ZCOOL_XiaoWei({
   subsets: ["latin"],
@@ -30,7 +31,9 @@ export default function RootLayout({
   return (
     <html lang="zh-CN">
       <body className={`${display.variable} ${body.variable} antialiased`}>
-        {children}
+        <Providers>
+          {children}
+        </Providers>
       </body>
     </html>
   );
