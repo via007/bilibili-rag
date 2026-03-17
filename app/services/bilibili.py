@@ -3,10 +3,12 @@ Bilibili RAG 知识库系统
 
 B站 API 服务模块
 """
+import json
 import httpx
 import qrcode
 import io
 import base64
+import gzip
 from typing import Optional, Dict, Any, List
 from loguru import logger
 from app.services.wbi import wbi_signer
@@ -20,9 +22,13 @@ class BilibiliService:
     
     # 通用请求头
     HEADERS = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Referer": "https://www.bilibili.com/",
-        "Origin": "https://www.bilibili.com"
+        "Origin": "https://www.bilibili.com",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        # 不手动设置 Accept-Encoding，让 httpx 自动处理解压
+        "Connection": "keep-alive",
     }
     
     def __init__(self, sessdata: str = None, bili_jct: str = None, dedeuserid: str = None):
@@ -37,7 +43,13 @@ class BilibiliService:
         self.sessdata = sessdata
         self.bili_jct = bili_jct
         self.dedeuserid = dedeuserid
-        self.client = httpx.AsyncClient(timeout=30.0, headers=self.HEADERS)
+        # 禁用 HTTP/2，B 站 API 对 HTTP/2 支持不稳定，可能导致响应解析错误
+        self.client = httpx.AsyncClient(
+            timeout=30.0,
+            headers=self.HEADERS,
+            http2=False,
+            limits=httpx.Limits(max_connections=10, max_keepalive_connections=5)
+        )
     
     def _get_cookies(self) -> Dict[str, str]:
         """获取 Cookie"""
@@ -53,13 +65,63 @@ class BilibiliService:
     async def close(self):
         """关闭客户端"""
         await self.client.aclose()
-    
+
+    async def _request_json(self, url: str, method: str = "GET", **kwargs) -> Dict[str, Any]:
+        """
+        统一处理 API 请求和响应
+
+        Args:
+            url: 请求 URL
+            method: 请求方法
+            **kwargs: 传递给 httpx 的其他参数
+
+        Returns:
+            解析后的 JSON 数据
+        """
+        if method == "GET":
+            response = await self.client.get(url, **kwargs)
+        else:
+            response = await self.client.post(url, **kwargs)
+
+        if response.status_code == 412:
+            raise Exception("触发 B 站安全风控 (412)。请尝试重新扫码或等待后重试")
+        elif response.status_code != 200:
+            raise Exception(f"API 请求失败: HTTP {response.status_code}")
+
+        # 处理响应内容 - 可能是 gzip 压缩的
+        content = response.content
+
+        # httpx 会自动解压 gzip，直接使用 response.text
+        # 但如果失败，手动处理
+        try:
+            text = response.text
+        except Exception:
+            # 手动处理 gzip 压缩
+            if response.headers.get("Content-Encoding") == "gzip":
+                try:
+                    content = gzip.decompress(response.content)
+                    text = content.decode("utf-8")
+                except Exception as e:
+                    logger.error(f"gzip 解压失败: {e}")
+                    raise Exception(f"响应解压失败: {e}")
+            else:
+                text = response.content.decode("utf-8", errors="replace")
+
+        if not text or not text.strip():
+            raise Exception(f"API 返回空响应: {url}")
+
+        try:
+            return json.loads(text)
+        except Exception as e:
+            logger.error(f"JSON 解析失败, 响应内容: {text[:500]}")
+            raise Exception(f"API 响应解析失败: {e}")
+
     # ==================== 登录相关 ====================
     
     async def generate_qrcode(self) -> Dict[str, Any]:
         """
         生成登录二维码
-        
+
         Returns:
             {
                 "qrcode_key": "二维码 key",
@@ -69,10 +131,44 @@ class BilibiliService:
         """
         url = f"{self.PASSPORT_URL}/x/passport-login/web/qrcode/generate"
         response = await self.client.get(url)
-        data = response.json()
-        
-        if data["code"] != 0:
-            raise Exception(f"生成二维码失败: {data['message']}")
+
+        # 检查响应状态和内容
+        if response.status_code != 200:
+            # 打印更多诊断信息
+            logger.error(f"生成二维码失败: HTTP {response.status_code}, 内容: {response.text[:500] if response.text else '空'}")
+            raise Exception(f"生成二维码请求失败: HTTP {response.status_code}")
+
+        # 检查 Content-Type，判断是否返回了 HTML/图片（可能触发了反爬）
+        content_type = response.headers.get("content-type", "")
+        if "text/html" in content_type:
+            logger.error(f"B 站返回了 HTML 页面，可能触发了验证码或风控: {response.text[:500]}")
+            raise Exception("触发 B 站风控，请稍后重试或更换网络")
+
+        if not response.text or not response.text.strip():
+            raise Exception("生成二维码返回空响应")
+
+        try:
+            data = response.json()
+        except Exception as e:
+            # 尝试手动解压（某些情况下 httpx 未自动解压）
+            import zlib
+            try:
+                # 尝试用 gzip 解压
+                decompressed = zlib.decompress(response.content, zlib.MAX_WBITS + 16)
+                data = json.loads(decompressed.decode('utf-8'))
+            except Exception:
+                try:
+                    # 尝试用 deflate 解压
+                    decompressed = zlib.decompress(response.content, -zlib.MAX_WBITS)
+                    data = json.loads(decompressed.decode('utf-8'))
+                except Exception:
+                    # 打印十六进制前几个字节帮助诊断
+                    hex_preview = response.content[:20].hex() if response.content else "空"
+                    logger.error(f"JSON 解析失败, 响应内容(hex): {hex_preview}, 文本预览: {response.text[:200] if response.text else '空'}")
+                    raise Exception(f"生成二维码响应解析失败: {e}")
+
+        if data.get("code") != 0:
+            raise Exception(f"生成二维码失败: {data.get('message', '未知错误')}")
         
         qrcode_key = data["data"]["qrcode_key"]
         qrcode_url = data["data"]["url"]
@@ -191,8 +287,22 @@ class BilibiliService:
         params = {"up_mid": mid}
         
         response = await self.client.get(url, params=params, cookies=self._get_cookies())
-        data = response.json()
-        
+
+        # 检查响应状态和内容
+        if response.status_code == 412:
+            raise Exception("触发 B 站安全风控 (412)。请尝试：1) 重新扫码登录获取新 Cookie；2) 等待几分钟后重试；3) 检查网络 IP 是否被临时封禁")
+        elif response.status_code != 200:
+            raise Exception(f"B 站 API 请求失败: HTTP {response.status_code}")
+
+        if not response.text or not response.text.strip():
+            raise Exception(f"B 站 API 返回空响应, URL: {response.url}")
+
+        try:
+            data = response.json()
+        except Exception as e:
+            logger.error(f"JSON 解析失败, 响应内容: {response.text[:500]}")
+            raise Exception(f"B 站 API 响应 JSON 解析失败: {e}")
+
         if data["code"] != 0:
             raise Exception(f"获取收藏夹失败: {data['message']}")
         
@@ -319,6 +429,12 @@ class BilibiliService:
     
     # ==================== 视频信息相关 ====================
     
+    def _real_bvid(self, bvid: str) -> str:
+        """剥离伪 BVID 后缀，还原真实 BVID"""
+        if bvid and "_p" in bvid:
+            return bvid.split("_p")[0]
+        return bvid
+    
     async def get_video_info(self, bvid: str) -> Dict[str, Any]:
         """
         获取视频详细信息
@@ -330,7 +446,7 @@ class BilibiliService:
             视频信息字典
         """
         url = f"{self.BASE_URL}/x/web-interface/view"
-        params = {"bvid": bvid}
+        params = {"bvid": self._real_bvid(bvid)}
         
         response = await self.client.get(url, params=params, cookies=self._get_cookies())
         data = response.json()
@@ -338,6 +454,28 @@ class BilibiliService:
         if data["code"] != 0:
             raise Exception(f"获取视频信息失败: {data['message']}")
         
+        return data["data"]
+
+    async def get_video_pagelist(self, bvid: str) -> List[Dict[str, Any]]:
+        """
+        获取视频的选集列表 (分P)
+        
+        Args:
+            bvid: 视频 BV 号
+            
+        Returns:
+            选集列表
+        """
+        url = f"{self.BASE_URL}/x/player/pagelist"
+        params = {"bvid": self._real_bvid(bvid)}
+        
+        response = await self.client.get(url, params=params, cookies=self._get_cookies())
+        data = response.json()
+        
+        if data["code"] != 0:
+            logger.warning(f"获取视频分P列表失败 [{bvid}]: {data.get('message')}")
+            return []
+            
         return data["data"]
     
     async def get_video_summary(self, bvid: str, cid: int, up_mid: int = None) -> Dict[str, Any]:
@@ -355,7 +493,7 @@ class BilibiliService:
         url = f"{self.BASE_URL}/x/web-interface/view/conclusion/get"
         
         params = {
-            "bvid": bvid,
+            "bvid": self._real_bvid(bvid),
             "cid": cid,
         }
         if up_mid:
@@ -390,7 +528,7 @@ class BilibiliService:
             播放器信息
         """
         params = {
-            "bvid": bvid,
+            "bvid": self._real_bvid(bvid),
             "cid": cid,
         }
         if aid:
@@ -433,7 +571,7 @@ class BilibiliService:
             音频 URL（可能为空）
         """
         params = {
-            "bvid": bvid,
+            "bvid": self._real_bvid(bvid),
             "cid": cid,
             "fnval": 16,
             "fnver": 0,

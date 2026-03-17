@@ -131,18 +131,57 @@ async def get_favorite_videos(
         result = await bili.get_favorite_content(media_id, pn=page, ps=page_size)
         await bili.close()
         
+        import asyncio
+        
         # 处理视频列表
+        raw_medias = result.get("medias", [])
+        
+        # 并发获取每个视频的分P信息
+        async def fetch_parts(media):
+            bvid = media.get("bvid") or media.get("bv_id")
+            if not bvid:
+                return media, []
+            
+            try:
+                pages = await bili.get_video_pagelist(bvid)
+                return media, pages
+            except Exception as e:
+                logger.warning(f"获取分P信息失败 [{bvid}]: {e}")
+                return media, []
+        
+        tasks = [fetch_parts(m) for m in raw_medias]
+        media_parts_results = await asyncio.gather(*tasks) if tasks else []
+        
         videos = []
-        for media in result.get("medias", []):
+        for media, pages in media_parts_results:
+            bvid = media.get("bvid") or media.get("bv_id")
+            if not bvid:
+                continue
+                
+            parts = []
+            if pages and len(pages) > 1:
+                for p in pages:
+                    page_num = p.get("page")
+                    part_title = p.get("part") or f"P{page_num}"
+                    parts.append({
+                        "bvid": f"{bvid}_p{page_num}",
+                        "title": f"[{page_num}/{len(pages)}] {part_title}",
+                        "cid": p.get("cid"),
+                        "page": page_num,
+                        "duration": p.get("duration")
+                    })
+                    
             videos.append({
-                "bvid": media.get("bvid") or media.get("bv_id"),
+                "bvid": bvid,
                 "title": media.get("title"),
                 "cover": media.get("cover"),
                 "duration": media.get("duration"),
                 "owner": media.get("upper", {}).get("name"),
                 "play_count": media.get("cnt_info", {}).get("play"),
                 "intro": media.get("intro"),
-                "is_selected": True  # 默认选中
+                "is_selected": True,  # 默认选中
+                "parts": parts,
+                "page_count": len(pages) if pages else 1
             })
         
         return {
@@ -182,27 +221,61 @@ async def get_all_favorite_videos(
         all_videos = await bili.get_all_favorite_videos(media_id)
         await bili.close()
         
-        # 处理视频列表（过滤失效视频）
-        videos = []
-        for media in all_videos:
+        import asyncio
+        sem = asyncio.Semaphore(5)
+        
+        async def process_media(media):
             bvid = media.get("bvid") or media.get("bv_id")
             title = media.get("title", "")
             if not bvid:
-                continue
-            
-            # 过滤失效视频
+                return []
+                
             attr = media.get("attr", 0)
             if attr == 9 or title in ["已失效视频", "已删除视频"]:
-                continue
+                return []
                 
-            videos.append({
-                "bvid": bvid,
-                "title": title,
-                "cover": media.get("cover"),
-                "duration": media.get("duration"),
-                "owner": media.get("upper", {}).get("name"),
-                "cid": media.get("ugc", {}).get("first_cid") if media.get("ugc") else None
-            })
+            async with sem:
+                try:
+                    pages = await bili.get_video_pagelist(bvid)
+                except Exception as e:
+                    logger.warning(f"获取分P信息失败 [{bvid}]: {e}")
+                    pages = []
+                    
+            res = []
+            if pages and len(pages) > 1:
+                for p in pages:
+                    page_num = p.get("page")
+                    part_title = p.get("part") or f"P{page_num}"
+                    res.append({
+                        "bvid": f"{bvid}_p{page_num}",
+                        "title": f"[{page_num}/{len(pages)}] {title} - {part_title}",
+                        "cover": media.get("cover"),
+                        "duration": p.get("duration"),
+                        "owner": media.get("upper", {}).get("name"),
+                        "cid": p.get("cid"),
+                        "original_bvid": bvid,
+                        "is_part": True,
+                        "part_id": page_num
+                    })
+            else:
+                res.append({
+                    "bvid": bvid,
+                    "title": title,
+                    "cover": media.get("cover"),
+                    "duration": media.get("duration"),
+                    "owner": media.get("upper", {}).get("name"),
+                    "cid": media.get("ugc", {}).get("first_cid") if media.get("ugc") else None,
+                    "original_bvid": bvid,
+                    "is_part": False
+                })
+            return res
+            
+        tasks = [process_media(m) for m in all_videos]
+        parts_results = await asyncio.gather(*tasks) if tasks else []
+        
+        videos = []
+        for p_res in parts_results:
+            videos.extend(p_res)
         
         return {
             "total": len(videos),

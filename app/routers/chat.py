@@ -10,24 +10,23 @@ from fastapi.responses import StreamingResponse
 from loguru import logger
 from sqlalchemy import select, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
-from openai import OpenAI
-from langchain.schema import Document
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.documents import Document
 
 from app.database import get_db
 from app.models import ChatRequest, ChatResponse, FavoriteFolder, FavoriteVideo, VideoCache
 from app.config import settings
-from app.routers.knowledge import get_rag_service
+from app.routers.knowledge import get_rag_service, get_multi_recall_service
+from app.services.conversation import ConversationService
+from app.services.llm_factory import get_llm_client
+from app.services.citation import CitationGenerator
 
 router = APIRouter(prefix="/chat", tags=["对话"])
 
-def _get_llm_client() -> OpenAI:
-    """获取 LLM 客户端"""
-    if not settings.openai_api_key:
-        raise HTTPException(status_code=400, detail="未配置 LLM API Key")
-    return OpenAI(
-        api_key=settings.openai_api_key,
-        base_url=settings.openai_base_url,
-    )
+
+def get_conversation_service(db: AsyncSession) -> ConversationService:
+    """获取会话服务实例"""
+    return ConversationService(db)
 
 def _build_overview_messages(context: str, question: str) -> list[dict]:
     system = (
@@ -179,7 +178,7 @@ def _route_with_rules(question: str, is_collection_intent: bool, related: bool) 
 def _route_with_llm(question: str) -> tuple[Optional[str], str]:
     """使用 LLM 进行路由判断"""
     try:
-        client = _get_llm_client()
+        client = get_llm_client()
         system = (
             "你是一个路由器，只输出以下之一：direct, db_list, db_content, vector。\n"
             "规则：\n"
@@ -192,15 +191,11 @@ def _route_with_llm(question: str) -> tuple[Optional[str], str]:
             "Q: 概览我收藏夹里所有王德峰相关内容 -> db_content\n"
             "只输出一个词，不要解释。"
         )
-        resp = client.chat.completions.create(
-            model=settings.llm_model,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": question},
-            ],
-            temperature=0,
-        )
-        text = (resp.choices[0].message.content or "").strip()
+        resp = client.invoke([
+            SystemMessage(content=system),
+            HumanMessage(content=question)
+        ])
+        text = (resp.content or "").strip()
         match = re.search(r"(direct|db_list|db_content|vector)", text)
         return (match.group(1) if match else None), text
     except Exception as e:
@@ -377,10 +372,52 @@ async def _get_video_titles_context(db: AsyncSession, folder_ids: List[int], lim
     context_parts = [f"【{folder_name}】\n" + "\n".join(videos) for folder_name, videos in grouped.items()]
     return "\n\n".join(context_parts)
 
-async def _prepare_messages(request: ChatRequest, db: AsyncSession) -> tuple[list[dict], List[dict], str]:
-    """准备 LLM 消息与来源信息"""
+def _add_context_to_messages(messages: list[dict], context_messages: list[dict]) -> list[dict]:
+    """将上下文消息添加到消息列表中"""
+    if not context_messages:
+        return messages
+    # 将上下文消息插入到 system 消息之后
+    if messages and messages[0].get("role") == "system":
+        return [messages[0]] + context_messages + messages[1:]
+    return context_messages + messages
+
+
+def _infer_route(messages: list[dict]) -> str:
+    """从消息内容推断路由类型"""
+    if not messages:
+        return "unknown"
+    # 检查 system 消息内容
+    system_content = messages[0].get("content", "") if messages[0].get("role") == "system" else ""
+    if "检索" in system_content or "向量" in system_content:
+        return "vector"
+    if "清单" in system_content or "列表" in system_content:
+        return "db_list"
+    if "总结" in system_content or "概括" in system_content:
+        return "db_content"
+    if "直接回答" in system_content:
+        return "direct"
+    return "unknown"
+
+
+async def _prepare_messages(request: ChatRequest, db: AsyncSession) -> tuple[list[dict], List[dict], str, List[Document]]:
+    """准备 LLM 消息与来源信息
+    Returns:
+        (messages, sources, question, docs)
+        - docs: 向量检索返回的文档列表，用于引用高亮
+    """
     question = request.question.strip()
     rag = get_rag_service()
+
+    # 获取多轮对话上下文
+    context_messages = []
+    if request.chat_session_id:
+        conv_service = get_conversation_service(db)
+        context_messages = await conv_service.get_context_for_llm(
+            request.chat_session_id,
+            max_tokens=4000
+        )
+        logger.info(f"会话历史上下文: {len(context_messages)} 条消息")
+
     folder_ids = []
     if request.session_id:
         folder_ids = await _get_folder_ids_for_session(db, request.session_id, request.folder_ids)
@@ -411,45 +448,104 @@ async def _prepare_messages(request: ChatRequest, db: AsyncSession) -> tuple[lis
             if not context:
                 context = "（暂无已入库的视频信息，请提醒用户可能需要先进行入库操作）"
             messages = _build_fallback_messages(context, question)
-            return messages, sources, question
+            messages = _add_context_to_messages(messages, context_messages)
+            return messages, sources, question, []
         messages = _build_direct_messages(question)
-        return messages, [], question
+        messages = _add_context_to_messages(messages, context_messages)
+        return messages, [], question, []
     # 3) 直接回答
     if route == "direct":
         title_context = await _get_video_titles_context(db, folder_ids, limit=50)
         messages = _build_direct_messages_with_context(title_context, question) if title_context else _build_direct_messages(question)
-        return messages, [], question
+        messages = _add_context_to_messages(messages, context_messages)
+        return messages, [], question, []
     # 4) 列表类问题
     if route == "db_list":
         if related is None:
             related = await _is_related_to_collection(db, folder_ids, question)
         if not related and not is_collection_intent:
-            return _build_direct_messages(question), [], question
+            messages = _build_direct_messages(question)
+            messages = _add_context_to_messages(messages, context_messages)
+            return messages, [], question, []
         context, sources = await _get_video_context(db, folder_ids, include_content=False, limit=50)
         if not context:
-            return _build_fallback_messages("（暂无信息，请入库）", question), sources, question
-        return _build_db_list_messages(context, question), sources, question
+            messages = _build_fallback_messages("（暂无信息，请入库）", question)
+            messages = _add_context_to_messages(messages, context_messages)
+            return messages, sources, question, []
+        messages = _build_db_list_messages(context, question)
+        messages = _add_context_to_messages(messages, context_messages)
+        return messages, sources, question, []
     # 5) 总结类问题
     if route == "db_content":
         if related is None:
             related = await _is_related_to_collection(db, folder_ids, question)
         if not related and not is_collection_intent:
-            return _build_direct_messages(question), [], question
+            messages = _build_direct_messages(question)
+            messages = _add_context_to_messages(messages, context_messages)
+            return messages, [], question, []
         context, sources = await _get_video_context(db, folder_ids, include_content=True, limit=None)
         if not context:
-            return _build_fallback_messages("（暂无信息，请入库）", question), sources, question
-        return _build_db_summary_messages(context, question), sources, question
+            messages = _build_fallback_messages("（暂无信息，请入库）", question)
+            messages = _add_context_to_messages(messages, context_messages)
+            return messages, sources, question, []
+        messages = _build_db_summary_messages(context, question)
+        messages = _add_context_to_messages(messages, context_messages)
+        return messages, sources, question, []
     # 6) 检查相关性
     if related is None:
         related = await _is_related_to_collection(db, folder_ids, question)
     if not related and not is_collection_intent:
-        return _build_direct_messages(question), [], question
-    # 7) 向量检索
+        messages = _build_direct_messages(question)
+        messages = _add_context_to_messages(messages, context_messages)
+        return messages, [], question, []
+    # 7) 向量检索 (使用多路召回 + 重排序)
     docs = []
     try:
-        docs = rag.search(question, k=5, bvids=bvids if bvids else None)
+        # 检查是否启用多路召回
+        if getattr(settings, 'rag_multi_recall', True):
+            # 使用多路召回
+            multi_recall = get_multi_recall_service()
+            docs, recall_info = await multi_recall.search(
+                query=question,
+                k=10,  # 召回更多用于重排序
+                bvids=bvids if bvids else None,
+                enable_keyword=True,
+                enable_time=True,
+                keyword_weight=getattr(settings, 'rrf_keyword_weight', 0.3),
+                vector_weight=getattr(settings, 'rrf_vector_weight', 0.5),
+                time_weight=getattr(settings, 'rrf_time_weight', 0.2)
+            )
+            logger.info(f"多路召回: {recall_info}")
+
+            # 检查是否启用重排序
+            if getattr(settings, 'rag_rerank', True) and docs:
+                try:
+                    from app.services.reranker import CrossEncoderReranker, FusedRetrievedDoc
+
+                    # 构造重排序输入
+                    candidates = []
+                    for i, doc in enumerate(docs[:10]):
+                        candidates.append(FusedRetrievedDoc(
+                            doc=doc,
+                            score=doc.metadata.get('_rrf_score', 0.0),
+                            rank=i + 1,
+                            sources=['multi_recall']
+                        ))
+
+                    # 执行重排序
+                    reranker = CrossEncoderReranker(model_name=getattr(settings, 'rerank_model', 'BAAI/bge-reranker-base'))
+                    reranked = reranker.rerank(question, candidates, top_k=5)
+
+                    # 更新 docs 列表
+                    docs = [r.doc for r in reranked]
+                    logger.info(f"重排序完成，保留 {len(docs)} 个结果")
+                except Exception as e:
+                    logger.warning(f"重排序失败: {e}")
+        else:
+            # 使用传统向量检索
+            docs = rag.search(question, k=5, bvids=bvids if bvids else None)
     except Exception as e:
-        logger.warning(f"向量检索失败: {e}")
+        logger.warning(f"检索失败: {e}")
     if docs:
         filtered_docs = _filter_docs_by_keywords(docs, question)
         docs = filtered_docs if filtered_docs else docs
@@ -460,10 +556,15 @@ async def _prepare_messages(request: ChatRequest, db: AsyncSession) -> tuple[lis
             if bvid and bvid not in seen_bvids:
                 seen_bvids.add(bvid)
                 sources.append({"bvid": bvid, "title": title, "url": f"https://www.bilibili.com/video/{bvid}"})
-        return _build_rag_messages("\n\n---\n\n".join(context_parts), question), sources, question
+        messages = _build_rag_messages("\n\n---\n\n".join(context_parts), question)
+        messages = _add_context_to_messages(messages, context_messages)
+        # 返回 docs 用于引用高亮
+        return messages, sources, question, docs
     # 兜底
     context, sources = await _get_video_context(db, folder_ids, include_content=False, limit=50)
-    return _build_fallback_messages(context or "（暂无入库信息）", question), sources, question
+    messages = _build_fallback_messages(context or "（暂无入库信息）", question)
+    messages = _add_context_to_messages(messages, context_messages)
+    return messages, sources, question, []
 
 @router.post("/ask", response_model=ChatResponse)
 async def ask_question(request: ChatRequest, db: AsyncSession = Depends(get_db)):
@@ -471,10 +572,73 @@ async def ask_question(request: ChatRequest, db: AsyncSession = Depends(get_db))
     if not request.question or not request.question.strip():
         raise HTTPException(status_code=400, detail="问题不能为空")
     try:
-        messages, sources, _ = await _prepare_messages(request, db)
-        client = _get_llm_client()
-        response = client.chat.completions.create(model=settings.llm_model, messages=messages, temperature=0.5)
-        return ChatResponse(answer=response.choices[0].message.content or "", sources=sources[:5])
+        messages, sources, _, docs = await _prepare_messages(request, db)
+
+        # 如果有 docs，使用引用生成器生成带引用的回答
+        if docs:
+            citation_gen = CitationGenerator()
+            cited_result = await citation_gen.generate_with_citations(
+                request.question,
+                docs,
+                k=5
+            )
+            answer = cited_result["answer"]
+            # 合并引用来源
+            if cited_result.get("sources"):
+                sources = cited_result["sources"]
+        else:
+            # 传统方式调用 LLM
+            client = get_llm_client()
+            logger.info(f"[DEBUG ask] LLM client: model={client.model_name}")
+            # 转换消息格式为 langchain 格式
+            lc_messages = []
+            for msg in messages:
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                if role == "system":
+                    lc_messages.append(SystemMessage(content=content))
+                else:
+                    lc_messages.append(HumanMessage(content=content))
+
+            response = client.invoke(lc_messages)
+            answer = response.content or ""
+
+        # 如果指定了 chat_session_id，保存消息到会话历史
+        if request.chat_session_id:
+            conv_service = get_conversation_service(db)
+            # 获取路由信息（从 messages 中推断或使用默认值）
+            route = _infer_route(messages)
+
+            # 保存用户问题
+            await conv_service.add_message(
+                chat_session_id=request.chat_session_id,
+                role="user",
+                content=request.question,
+                route=route
+            )
+            # 保存 AI 回答
+            await conv_service.add_message(
+                chat_session_id=request.chat_session_id,
+                role="assistant",
+                content=answer,
+                sources=sources,
+                route=route
+            )
+            # 更新会话的最后消息时间
+            await conv_service.update_session_last_message(request.chat_session_id)
+
+            # 如果会话没有标题，使用首问生成标题
+            session = await conv_service.get_session(request.chat_session_id)
+            if session and (not session.title or session.title == "新会话"):
+                # 生成会话标题
+                new_title = await conv_service.generate_session_title(request.question)
+                await conv_service.update_session(
+                    chat_session_id=request.chat_session_id,
+                    user_session_id=request.session_id or "",
+                    title=new_title
+                )
+
+        return ChatResponse(answer=answer, sources=sources[:5])
     except HTTPException: raise
     except Exception as e:
         logger.error(f"问答失败: {e}")
@@ -486,14 +650,105 @@ async def ask_question_stream(request: ChatRequest, db: AsyncSession = Depends(g
     if not request.question or not request.question.strip():
         raise HTTPException(status_code=400, detail="问题不能为空")
     try:
-        messages, sources, _ = await _prepare_messages(request, db)
-        client = _get_llm_client()
-        def generate():
-            stream = client.chat.completions.create(model=settings.llm_model, messages=messages, temperature=0.5, stream=True)
-            for chunk in stream:
-                delta = chunk.choices[0].delta
-                if delta and delta.content: yield delta.content
+        messages, sources, _, docs = await _prepare_messages(request, db)
+        client = get_llm_client()
+        route = _infer_route(messages)
+
+        # 如果有 docs，使用引用生成器生成带引用的回答（流式接口暂不支持）
+        if docs:
+            citation_gen = CitationGenerator()
+            cited_result = await citation_gen.generate_with_citations(
+                request.question,
+                docs,
+                k=5
+            )
+            # 直接返回非流式结果
+            answer = cited_result["answer"]
+            if cited_result.get("sources"):
+                sources = cited_result["sources"]
+            # 保存消息
+            if request.chat_session_id:
+                conv_service = get_conversation_service(db)
+                await conv_service.add_message(
+                    chat_session_id=request.chat_session_id,
+                    role="user",
+                    content=request.question,
+                    route=route
+                )
+                await conv_service.add_message(
+                    chat_session_id=request.chat_session_id,
+                    role="assistant",
+                    content=answer,
+                    sources=sources,
+                    route=route
+                )
+                await conv_service.update_session_last_message(request.chat_session_id)
+                session = await conv_service.get_session(request.chat_session_id)
+                if session and (not session.title or session.title == "新会话"):
+                    new_title = await conv_service.generate_session_title(request.question)
+                    await conv_service.update_session(
+                        chat_session_id=request.chat_session_id,
+                        user_session_id=request.session_id or "",
+                        title=new_title
+                    )
+            return ChatResponse(answer=answer, sources=sources[:5])
+
+        # 用于收集完整回答
+        full_answer = []
+
+        async def generate():
+            nonlocal full_answer
+            # 转换消息格式为 langchain 格式
+            lc_messages = []
+            for msg in messages:
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                if role == "system":
+                    lc_messages.append(SystemMessage(content=content))
+                else:
+                    lc_messages.append(HumanMessage(content=content))
+
+            # 使用 langchain 的 stream 方法
+            for chunk in client.stream(lc_messages):
+                if chunk.content:
+                    full_answer.append(chunk.content)
+                    yield chunk.content
             yield f"\n[[SOURCES_JSON]]{json.dumps(sources, ensure_ascii=False)}"
+
+            # 流式响应结束后，保存消息到会话历史
+            if request.chat_session_id and full_answer:
+                try:
+                    conv_service = get_conversation_service(db)
+                    # 保存用户问题
+                    await conv_service.add_message(
+                        chat_session_id=request.chat_session_id,
+                        role="user",
+                        content=request.question,
+                        route=route
+                    )
+                    # 保存 AI 回答
+                    await conv_service.add_message(
+                        chat_session_id=request.chat_session_id,
+                        role="assistant",
+                        content="".join(full_answer),
+                        sources=sources,
+                        route=route
+                    )
+                    # 更新会话的最后消息时间
+                    await conv_service.update_session_last_message(request.chat_session_id)
+
+                    # 如果会话没有标题，使用首问生成标题
+                    session = await conv_service.get_session(request.chat_session_id)
+                    if session and (not session.title or session.title == "新会话"):
+                        new_title = await conv_service.generate_session_title(request.question)
+                        await conv_service.update_session(
+                            chat_session_id=request.chat_session_id,
+                            user_session_id=request.session_id or "",
+                            title=new_title
+                        )
+                except Exception as save_err:
+                    logger.warning(f"保存会话消息失败: {save_err}")
+
         return StreamingResponse(generate(), media_type="text/plain; charset=utf-8")
     except HTTPException: raise
     except Exception as e:
@@ -501,24 +756,73 @@ async def ask_question_stream(request: ChatRequest, db: AsyncSession = Depends(g
         raise HTTPException(status_code=500, detail=f"流式问答失败: {str(e)}")
 
 @router.post("/search")
-async def search_videos(query: str, k: int = 5):
-    """搜索相关视频片段"""
+async def search_videos(
+    query: str,
+    k: int = 5,
+    use_multi_recall: bool = True,
+    enable_keyword: bool = True,
+    enable_time: bool = True,
+    keyword_weight: float = 0.3,
+    vector_weight: float = 0.5,
+    time_weight: float = 0.2
+):
+    """
+    搜索相关视频片段
+
+    Args:
+        query: 搜索关键词
+        k: 返回结果数量
+        use_multi_recall: 是否使用多路召回（默认启用）
+        enable_keyword: 是否启用关键词检索（多路召回时有效）
+        enable_time: 是否启用时间排序（多路召回时有效）
+        keyword_weight: 关键词权重（多路召回时有效）
+        vector_weight: 向量权重（多路召回时有效）
+        time_weight: 时间权重（多路召回时有效）
+    """
     if not query or not query.strip():
         raise HTTPException(status_code=400, detail="查询不能为空")
+
     try:
-        rag = get_rag_service()
-        docs = rag.search(query, k=k)
+        if use_multi_recall:
+            # 使用多路召回
+            multi_recall = get_multi_recall_service()
+            docs, recall_info = await multi_recall.search(
+                query=query,
+                k=k,
+                enable_keyword=enable_keyword,
+                enable_time=enable_time,
+                keyword_weight=keyword_weight,
+                vector_weight=vector_weight,
+                time_weight=time_weight
+            )
+            logger.info(f"多路召回信息: {recall_info}")
+        else:
+            # 使用传统向量检索
+            rag = get_rag_service()
+            docs = rag.search(query, k=k)
+
         results, seen_bvids = [], set()
         for doc in docs:
             bvid = doc.metadata.get("bvid", "")
-            if bvid in seen_bvids: continue
+            if bvid in seen_bvids:
+                continue
             seen_bvids.add(bvid)
-            results.append({
+
+            # 获取 RRF 得分（如果有）
+            rrf_score = doc.metadata.get("_rrf_score")
+
+            result = {
                 "bvid": bvid,
                 "title": doc.metadata.get("title", ""),
                 "url": doc.metadata.get("url", ""),
                 "content_preview": doc.page_content[:200] + "..." if len(doc.page_content) > 200 else doc.page_content
-            })
+            }
+
+            if rrf_score is not None:
+                result["rrf_score"] = round(rrf_score, 4)
+
+            results.append(result)
+
         return {"results": results}
     except Exception as e:
         logger.error(f"搜索失败: {e}")
