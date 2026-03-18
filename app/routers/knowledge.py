@@ -624,6 +624,8 @@ async def get_knowledge_stats():
 
 
 # 先定义更具体的路由（带路径参数的）
+logger.info("=== get_folder_detail_status route called ===")
+
 @router.get("/folders/{media_id}/status", response_model=FolderDetailStatus)
 async def get_folder_detail_status(
     media_id: int,
@@ -634,9 +636,11 @@ async def get_folder_detail_status(
     db: AsyncSession = Depends(get_db),
 ):
     """获取收藏夹详细状态（含视频列表、分页、筛选）"""
+    logger.info(f"get_folder_detail_status called: media_id={media_id}, session_id={session_id}")
     # 1. 获取用户的 session_ids
     session = await get_session(session_id)
     if not session:
+        logger.info(f"Session not found for session_id={session_id}")
         raise HTTPException(status_code=401, detail="未登录或会话已过期")
 
     mid = session.get("user_info", {}).get("mid") or session.get("cookies", {}).get("DedeUserID")
@@ -656,8 +660,26 @@ async def get_folder_detail_status(
         )
     )
     folder = folder_result.scalars().first()
+    logger.info(f"Folder query: media_id={media_id}, target_session_ids={target_session_ids}, folder={folder}")
     if not folder:
-        raise HTTPException(status_code=404, detail="收藏夹不存在")
+        # 收藏夹未向量化，返回友好响应
+        logger.info(f"Folder not found, returning empty status for media_id={media_id}")
+        return FolderDetailStatus(
+            media_id=media_id,
+            stats={
+                "pending": 0,
+                "processing": 0,
+                "completed": 0,
+                "failed": 0,
+                "no_content": 0
+            },
+            videos=[],
+            progress=0,
+            total=0,
+            page=1,
+            page_size=page_size,
+            has_more=False
+        )
 
     # 3. 获取该收藏夹下的所有视频
     video_result = await db.execute(
@@ -1229,7 +1251,19 @@ async def get_asr_status(
     cache = result.scalar_one_or_none()
 
     if not cache:
-        raise HTTPException(status_code=404, detail=f"视频 {bvid} 不存在")
+        # 视频未向量化，返回友好响应
+        return ASRStatusResponse(
+            bvid=bvid,
+            asr_status="not_indexed",
+            asr_model=None,
+            asr_duration=None,
+            asr_quality_score=None,
+            asr_quality_flags=[],
+            content=None,
+            is_corrected=False,
+            corrected_content=None,
+            created_at=None
+        )
 
     # 根据内容来源和处理状态确定 ASR 状态
     asr_status = "pending"

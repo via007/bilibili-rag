@@ -361,19 +361,22 @@ class BilibiliService:
         """
         all_videos = []
         pn = 1
-        
+
         while True:
             result = await self.get_favorite_content(media_id, pn=pn, ps=20)
-            all_videos.extend(result["medias"])
-            
-            if not result["has_more"]:
+            medias = result.get("medias", [])
+            logger.info(f"收藏夹 {media_id} 第 {pn} 页: 获取到 {len(medias)} 个视频, has_more: {result.get('has_more')}")
+            all_videos.extend(medias)
+
+            if not result.get("has_more"):
                 break
             pn += 1
-            
+
             # 避免请求过快
             import asyncio
             await asyncio.sleep(0.3)
-        
+
+        logger.info(f"收藏夹 {media_id} 总共获取到 {len(all_videos)} 个视频")
         return all_videos
 
     async def move_favorite_resources(
@@ -475,8 +478,122 @@ class BilibiliService:
         if data["code"] != 0:
             logger.warning(f"获取视频分P列表失败 [{bvid}]: {data.get('message')}")
             return []
-            
+
         return data["data"]
+
+    async def get_series_videos(self, series_id: int) -> List[Dict[str, Any]]:
+        """
+        获取B站系列/合集的视频列表
+
+        Args:
+            series_id: 系列 ID
+
+        Returns:
+            系列视频列表
+        """
+        logger.info(f"[get_series_videos] 开始获取系列视频, series_id={series_id}")
+
+        # 方法1: /x/v3/fav/resource/deal/season (可能是番剧/官方系列)
+        url = f"{self.BASE_URL}/x/v3/fav/resource/deal/season"
+        params = {
+            "id": series_id,
+            "type": 2,  # 2 = 系列/合集
+            "pn": 1,
+            "ps": 100,  # 最大100
+        }
+
+        try:
+            response = await self.client.get(url, params=params, cookies=self._get_cookies())
+            data = response.json()
+            logger.info(f"[get_series_videos] API1 /x/v3/fav/resource/deal/season 返回: code={data.get('code')}, message={data.get('message')}")
+
+            if data.get("code") == 0:
+                medias = data["data"].get("medias", []) or []
+                logger.info(f"[get_series_videos] API1 返回 {len(medias)} 个视频")
+                if medias:
+                    logger.info(f"[get_series_videos] API1 第一个视频: {medias[0].get('title')}")
+                    return medias
+        except Exception as e:
+            logger.warning(f"[get_series_videos] API1 异常: {e}")
+
+        # 方法2: /x/vseries/season (用户系列)
+        logger.info(f"[get_series_videos] 尝试 API2 /x/vseries/season")
+        result = await self._get_series_videos_v2(series_id)
+        if result:
+            logger.info(f"[get_series_videos] API2 返回 {len(result)} 个视频")
+            return result
+
+        # 方法3: /x/series/v1/season/seasonInfo
+        logger.info(f"[get_series_videos] 尝试 API3 /x/series/v1/season/seasonInfo")
+        result = await self._get_series_videos_v3(series_id)
+        if result:
+            logger.info(f"[get_series_videos] API3 返回 {len(result)} 个视频")
+            return result
+
+        logger.warning(f"[get_series_videos] 所有 API 都未能获取到系列视频, series_id={series_id}")
+        return []
+
+    async def _get_series_videos_v2(self, series_id: int) -> List[Dict[str, Any]]:
+        """备用方法获取系列视频 - /x/vseries/season"""
+        url = f"{self.BASE_URL}/x/vseries/season"
+        params = {"id": series_id}
+
+        try:
+            response = await self.client.get(url, params=params, cookies=self._get_cookies())
+            data = response.json()
+
+            if data["code"] != 0:
+                logger.warning(f"[get_series_videos] API2 失败: {data.get('message')}")
+                return []
+
+            # 解析返回数据
+            episodes = data.get("data", {}).get("episodes", []) or []
+            videos = []
+            for ep in episodes:
+                videos.append({
+                    "bvid": ep.get("bvid"),
+                    "title": ep.get("title"),
+                    "cover": ep.get("cover"),
+                    "duration": ep.get("duration"),
+                    "desc": ep.get("desc"),
+                    "page": ep.get("page", {}).get("page") if isinstance(ep.get("page"), dict) else 1,
+                })
+            logger.info(f"[get_series_videos] API2 返回 {len(videos)} 个视频")
+            return videos
+        except Exception as e:
+            logger.error(f"[get_series_videos] API2 异常: {e}")
+            return []
+
+    async def _get_series_videos_v3(self, series_id: int) -> List[Dict[str, Any]]:
+        """第三个备用方法 - /x/series/v1/season/seasonInfo"""
+        url = f"{self.BASE_URL}/x/series/v1/season/seasonInfo"
+        params = {"season_id": series_id}
+
+        try:
+            response = await self.client.get(url, params=params, cookies=self._get_cookies())
+            data = response.json()
+
+            if data["code"] != 0:
+                logger.warning(f"[get_series_videos] API3 失败: {data.get('message')}")
+                return []
+
+            # 解析返回数据
+            episodes = data.get("data", {}).get("episodes", []) or []
+            videos = []
+            for ep in episodes:
+                videos.append({
+                    "bvid": ep.get("bvid"),
+                    "title": ep.get("title"),
+                    "cover": ep.get("cover"),
+                    "duration": ep.get("duration"),
+                    "desc": ep.get("desc"),
+                    "page": ep.get("page", {}).get("page") if isinstance(ep.get("page"), dict) else 1,
+                })
+            logger.info(f"[get_series_videos] API3 返回 {len(videos)} 个视频")
+            return videos
+        except Exception as e:
+            logger.error(f"[get_series_videos] API3 异常: {e}")
+            return []
     
     async def get_video_summary(self, bvid: str, cid: int, up_mid: int = None) -> Dict[str, Any]:
         """
