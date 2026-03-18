@@ -46,6 +46,7 @@ import {
   IconFolderOpen,
   IconVideo,
   IconCloudDownload,
+  IconExternalLink,
 } from "@tabler/icons-react";
 import OrganizePreviewModal from "@/components/OrganizePreviewModal";
 import ExportModal from "@/components/ExportModal";
@@ -105,13 +106,33 @@ export default function SourcesPanel({ sessionId, onBuildDone, onSelectionChange
   const [videoSelectMode, setVideoSelectMode] = useState(false);
   const [selectedVideos, setSelectedVideos] = useState<Set<string>>(new Set());
 
-  const toggleGroupExpand = (origBvid: string) => {
-    setExpandedGroups(prev => {
-      const next = new Set(prev);
-      if (next.has(origBvid)) next.delete(origBvid);
-      else next.add(origBvid);
-      return next;
-    });
+  // 点击视频卡片展开视频列表的状态（用于显示系列/分P视频）
+  const [expandedFolderVideos, setExpandedFolderVideos] = useState<string | null>(null);
+  const [folderVideosCache, setFolderVideosCache] = useState<Record<string, { videos: any[]; mediaId: number }>>({});
+
+  const toggleFolderVideosExpand = async (bvid: string, mediaId: number) => {
+    const isExpanded = expandedFolderVideos === bvid;
+    // 缓存键用 bvid，因为是根据视频来获取系列/分P列表
+    const originalBvid = bvid.split('_p')[0];
+    const cacheKey = originalBvid;
+    console.log('toggleFolderVideosExpand:', bvid, mediaId, 'isExpanded:', isExpanded, 'cacheKey:', cacheKey);
+
+    if (!isExpanded && !folderVideosCache[cacheKey]) {
+      console.log('Requesting series videos for bvid:', originalBvid);
+      // 展开时根据bvid请求该视频所属系列的所有视频
+      try {
+        const res = await favoritesApi.getSeriesVideos(originalBvid, sessionId);
+        console.log('Got series videos:', res.videos?.length);
+        setFolderVideosCache(prev => ({
+          ...prev,
+          [cacheKey]: { videos: res.videos, mediaId }
+        }));
+      } catch (e) {
+        console.error("Failed to load series videos:", e);
+      }
+    }
+
+    setExpandedFolderVideos(prev => prev === bvid ? null : bvid);
   };
 
   // 加载收藏夹列表（从B站获取）
@@ -199,35 +220,49 @@ export default function SourcesPanel({ sessionId, onBuildDone, onSelectionChange
   const toggleExpand = async (id: number) => {
     const folder = folders.find((f) => f.media_id === id);
     const isExpanding = !folder?.expanded;
+    console.log('toggleExpand:', id, 'isExpanding:', isExpanding, 'hasVideos:', !!folder?.videos);
 
     setFolders((prev) =>
       prev.map((f) => {
         if (f.media_id !== id) return f;
         if (f.expanded) return { ...f, expanded: false };
-        if (f.videos) return { ...f, expanded: true };
         return { ...f, expanded: true, loading: true };
       })
     );
 
-    if (!folder?.videos) {
-      try {
-        const res = await favoritesApi.getAllVideos(id, sessionId);
-        setFolders((prev) =>
-          prev.map((f) =>
-            f.media_id === id ? { ...f, videos: res.videos, loading: false, media_count: res.total, count_source: "filtered" } : f
-          )
-        );
-        // 加载 ASR 状态
-        const bvids = res.videos.map((v: Video) => v.bvid);
-        loadASRStatuses(bvids);
-      } catch {
+    // 展开时加载视频列表（从 B 站）
+    if (isExpanding) {
+      console.log('Requesting videos from Bilibili for folder:', id);
+      // 如果没有视频数据，则请求
+      if (!folder?.videos) {
+        try {
+          console.log('Calling favoritesApi.getAllVideos...');
+          const res = await favoritesApi.getAllVideos(id, sessionId);
+          console.log('Got videos:', res.videos?.length);
+          setFolders((prev) =>
+            prev.map((f) =>
+              f.media_id === id ? { ...f, videos: res.videos, loading: false, media_count: res.total, count_source: "filtered" } : f
+            )
+          );
+          // 加载 ASR 状态
+          const bvids = res.videos.map((v: Video) => v.bvid);
+          loadASRStatuses(bvids);
+        } catch (e) {
+          console.error('Failed to load videos:', e);
+          setFolders((prev) =>
+            prev.map((f) => (f.media_id === id ? { ...f, loading: false } : f))
+          );
+        }
+      } else {
+        // 已有视频数据，只需要关闭 loading
+        console.log('Videos already loaded, just closing loading');
         setFolders((prev) =>
           prev.map((f) => (f.media_id === id ? { ...f, loading: false } : f))
         );
       }
     }
 
-    // 加载详细状态（向量化进度）
+    // 同时加载向量化进度状态
     if (isExpanding) {
       try {
         const detailStatus = await knowledgeApi.getFolderDetailStatus(id, sessionId, { page_size: 50 });
@@ -328,10 +363,12 @@ export default function SourcesPanel({ sessionId, onBuildDone, onSelectionChange
   const getASRStatusDisplay = (bvid: string) => {
     const status = asrStatusMap[bvid];
     if (!status) {
-      return { icon: "○", label: "未处理", className: "text-[var(--muted)]" };
+      return { icon: "○", label: "未入库", className: "text-[var(--muted)]" };
     }
 
     switch (status.asr_status) {
+      case "not_indexed":
+        return { icon: "○", label: "未入库", className: "text-[var(--muted)]" };
       case "pending":
         return { icon: "○", label: "待处理", className: "text-[var(--muted)]" };
       case "processing":
@@ -341,7 +378,7 @@ export default function SourcesPanel({ sessionId, onBuildDone, onSelectionChange
       case "failed":
         return { icon: "✗", label: "失败", className: "text-red-500" };
       default:
-        return { icon: "○", label: "未处理", className: "text-[var(--muted)]" };
+        return { icon: "○", label: "未入库", className: "text-[var(--muted)]" };
     }
   };
 
@@ -693,10 +730,12 @@ export default function SourcesPanel({ sessionId, onBuildDone, onSelectionChange
                                   <ScrollArea h={400} offsetScrollbars>
                                     <Stack gap="sm">
                                       {(() => {
-                                        const flatVideos = (detail?.videos || f.videos) || [];
+                                        // 优先使用 B 站视频列表（f.videos），其次使用知识库数据（detail?.videos）
+                                        const flatVideos = (f.videos || detail?.videos) || [];
                                         
                                         // 辅助渲染方法
-                                        const renderVideoCard = (v: any, videoDetail: any, isChild = false, parentGroup?: any) => {
+                                        const currentMediaId = f.media_id;
+                                        const renderVideoCard = (v: any, videoDetail: any, isChild = false, parentGroup?: any, mediaId?: number) => {
                                           const processingStatus = videoDetail?.processing_status;
                                           const asrData = asrStatusMap[v.bvid];
                                           const coverUrl = v.cover || videoDetail?.cover || `https://pic1.bimg.qq.top/kv?url=https://i0.hdslb.com/bfs/archive/${v.original_bvid || v.bvid.split('_p')[0]}.jpg`;
@@ -804,11 +843,7 @@ export default function SourcesPanel({ sessionId, onBuildDone, onSelectionChange
                                                 )}
 
                                                 <Group gap={4} style={{ flexShrink: 0 }} onClick={(e) => e.stopPropagation()}>
-                                                    {parentGroup ? (
-                                                        <ActionIcon variant="subtle" size="sm" color="gray">
-                                                           {expandedGroups.has(parentGroup.origBvid) ? <IconChevronDown size={16} /> : <IconChevronRight size={16} />}
-                                                        </ActionIcon>
-                                                    ) : (
+                                                    {!parentGroup && (
                                                         <>
                                                             {asrData?.asr_quality_flags && asrData.asr_quality_flags.length > 0 && (
                                                               <ActionIcon
@@ -844,6 +879,26 @@ export default function SourcesPanel({ sessionId, onBuildDone, onSelectionChange
                                                             >
                                                               <IconPencil size={14} />
                                                             </ActionIcon>
+                                                            <ActionIcon
+                                                              variant="subtle"
+                                                              color="teal"
+                                                              size="sm"
+                                                              title="展开视频列表"
+                                                              onClick={() => toggleFolderVideosExpand(v.bvid, currentMediaId)}
+                                                            >
+                                                              {expandedFolderVideos === v.bvid ? <IconChevronDown size={14} /> : <IconChevronRight size={14} />}
+                                                            </ActionIcon>
+                                                            <ActionIcon
+                                                              variant="subtle"
+                                                              color="orange"
+                                                              size="sm"
+                                                              title="在B站观看"
+                                                              component="a"
+                                                              href={`https://www.bilibili.com/video/${v.original_bvid || v.bvid.split('_p')[0]}${v.bvid.includes('_p') ? '?p=' + v.bvid.split('_p')[1] : ''}`}
+                                                              target="_blank"
+                                                            >
+                                                              <IconExternalLink size={14} />
+                                                            </ActionIcon>
                                                         </>
                                                     )}
                                                 </Group>
@@ -878,10 +933,12 @@ export default function SourcesPanel({ sessionId, onBuildDone, onSelectionChange
                                             } else if (!group.main && group.parts.length > 0) {
                                                 // 如果只有部分，没有 main，构造一个虚拟的 main
                                                 const first = group.parts[0];
+                                                // 优先使用 detail.videos[0].title（系列标题），其次使用第一个部分的标题
+                                                const seriesTitle = detail?.videos?.[0]?.title;
                                                 const virtualMain = {
                                                     ...first,
                                                     bvid: origBvid,
-                                                    title: first.title.replace(/\[\d+\/\d+\]\s*/, '').split(' - ')[0] || first.title,
+                                                    title: seriesTitle || first.title.replace(/\[\d+\/\d+\]\s*/, '').split(' - ')[0] || first.title,
                                                     isVirtual: true,
                                                 };
                                                 return { type: 'group', origBvid, main: virtualMain, parts: group.parts };
@@ -892,7 +949,52 @@ export default function SourcesPanel({ sessionId, onBuildDone, onSelectionChange
 
                                         return displayList.map((item, idx) => {
                                           if (item.type === 'single') {
-                                              return renderVideoCard(item.data, item.data.detail);
+                                              const bvid = item.data.bvid;
+                                              const isExpanded = expandedFolderVideos === bvid;
+                                              // 缓存键与 toggleFolderVideosExpand 保持一致，使用 originalBvid
+                                              const originalBvid = bvid.split('_p')[0];
+                                              const cacheKey = originalBvid;
+                                              const allVideos = folderVideosCache[cacheKey]?.videos || [];
+
+                                              return (
+                                                <Stack gap="xs" key={bvid}>
+                                                  {renderVideoCard(item.data, item.data.detail)}
+                                                  <Collapse in={isExpanded}>
+                                                    <Stack gap="xs" pl="md" style={{ borderLeft: '2px solid var(--mantine-color-teal-light)' }}>
+                                                      {(() => {
+                                                        // 显示该视频的分P列表
+                                                        console.log('Rendering video parts for:', bvid, 'total parts:', allVideos.length);
+                                                        if (allVideos.length === 0) {
+                                                          return (
+                                                            <Text size="xs" c="dimmed" ta="center" py="xs">
+                                                              暂无分P信息
+                                                            </Text>
+                                                          );
+                                                        }
+                                                        return allVideos.map((v: any) => (
+                                                          <Card key={v.bvid} padding="xs" radius="sm" withBorder>
+                                                            <Group gap="xs" wrap="nowrap">
+                                                              <Text size="xs" lineClamp={1} style={{ flex: 1 }} title={v.title}>{v.title}</Text>
+                                                              <Text size="xs" c="dimmed">{v.owner || ''}</Text>
+                                                              <ActionIcon
+                                                                variant="subtle"
+                                                                color="orange"
+                                                                size="xs"
+                                                                title="在B站观看"
+                                                                component="a"
+                                                                href={`https://www.bilibili.com/video/${v.original_bvid || originalBvid}${v.page ? '?p=' + v.page : ''}`}
+                                                                target="_blank"
+                                                              >
+                                                                <IconExternalLink size={12} />
+                                                              </ActionIcon>
+                                                            </Group>
+                                                          </Card>
+                                                        ));
+                                                      })()}
+                                                    </Stack>
+                                                  </Collapse>
+                                                </Stack>
+                                              );
                                           } else {
                                               const mainObj = item.main;
                                               const parts = item.parts;
