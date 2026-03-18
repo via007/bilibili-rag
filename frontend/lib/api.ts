@@ -222,7 +222,7 @@ export interface ChatResponse {
 
 export interface ASRStatus {
     bvid: string;
-    asr_status: "pending" | "processing" | "completed" | "failed";
+    asr_status: "pending" | "processing" | "completed" | "failed" | "not_indexed";
     asr_model?: string;
     asr_duration?: number;
     asr_quality_score?: number;
@@ -267,6 +267,32 @@ export const favoritesApi = {
     getAllVideos: (mediaId: number, sessionId: string) =>
         request<{ total: number; videos: Video[] }>(
             `/favorites/${mediaId}/all-videos?session_id=${sessionId}`
+        ),
+
+    // 获取视频所属系列的所有视频（根据bvid获取系列视频列表）
+    getSeriesVideos: (bvid: string, sessionId: string) =>
+        request<{ total: number; videos: Video[] }>(
+            `/favorites/series/${bvid}/videos?session_id=${sessionId}`
+        ),
+
+    // 获取视频的分P列表（点击展开时获取该视频的所有分P）
+    getVideoParts: (bvid: string, sessionId: string) =>
+        request<{
+            bvid: string;
+            title: string;
+            cover: string;
+            owner: string;
+            parts: Array<{
+                bvid: string;
+                title: string;
+                full_title: string;
+                page: number;
+                cid: number;
+                duration: number;
+            }>;
+            total_parts: number;
+        }>(
+            `/favorites/video/${bvid}/parts?session_id=${sessionId}`
         ),
 
     // 预览整理
