@@ -104,6 +104,18 @@ class FavoriteVideo(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class Conversation(Base):
+    """对话会话表"""
+    __tablename__ = "conversations"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    session_id = Column(String(64), index=True, nullable=False)
+    title = Column(String(200), nullable=True)
+    messages = Column(JSON, nullable=False, default=list)  # [{role, content, timestamp}]
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 # ==================== Pydantic 模型 (API 用) ====================
 
 class ContentSource(str, Enum):
@@ -164,9 +176,11 @@ class ChatRequest(BaseModel):
     question: str
     session_id: Optional[str] = None
     folder_ids: Optional[list[int]] = None  # 指定收藏夹，None 表示全部
+    conversation_id: Optional[int] = None
 
 
 class ChatResponse(BaseModel):
     """对话响应"""
     answer: str
     sources: list[dict]  # 来源视频列表
+    conversation_id: Optional[int] = None
