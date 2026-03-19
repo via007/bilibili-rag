@@ -63,18 +63,21 @@ export default function LoginModal({ isOpen, onClose, onSuccess }: Props) {
 
         <div className="mt-4 flex justify-center">
           {status === "loading" && (
-            <div className="w-48 h-48 flex items-center justify-center border border-dashed border-[var(--border)] rounded-2xl">
-              <div className="w-8 h-8 border-2 border-[var(--accent)] border-t-transparent rounded-full animate-spin" />
+            <div className="w-48 h-48 flex items-center justify-center rounded-2xl" style={{ border: '1px dashed var(--border-subtle)' }}>
+              <div className="w-10 h-10 relative">
+                <div className="absolute inset-0 rounded-full animate-spin" style={{ border: '3px solid transparent', borderTopColor: 'var(--accent)', animationDuration: '1s' }} />
+                <div className="absolute inset-1 rounded-full animate-spin" style={{ border: '3px solid transparent', borderBottomColor: 'var(--accent)', animationDirection: 'reverse', animationDuration: '0.6s' }} />
+              </div>
             </div>
           )}
 
           {(status === "ready" || status === "scanned") && qr && (
             <div className="relative">
-              <img src={qr.qrcode_image_base64} alt="二维码" className="w-48 h-48 rounded-2xl border border-[var(--border)]" />
+              <img src={qr.qrcode_image_base64} alt="二维码" className="w-48 h-48 rounded-2xl" style={{ border: '1px solid var(--border-subtle)' }} />
               {status === "scanned" && (
-                <div className="absolute inset-0 bg-white/90 rounded-2xl flex flex-col items-center justify-center">
+                <div className="absolute inset-0 rounded-2xl flex flex-col items-center justify-center" style={{ backgroundColor: 'rgba(28, 28, 30, 0.95)' }}>
                   <div className="status-pill">已扫码</div>
-                  <span className="text-sm mt-3">请在手机上确认</span>
+                  <span className="text-sm mt-3" style={{ color: 'var(--text-secondary)' }}>请在手机上确认</span>
                 </div>
               )}
             </div>
@@ -82,14 +85,14 @@ export default function LoginModal({ isOpen, onClose, onSuccess }: Props) {
 
           {status === "success" && (
             <div className="w-48 h-48 flex flex-col items-center justify-center">
-              <div className="status-pill">登录成功</div>
-              <p className="text-sm text-[var(--muted)] mt-3">正在进入工作台</p>
+              <div className="status-pill ok">登录成功</div>
+              <p className="text-sm mt-3" style={{ color: 'var(--text-tertiary)' }}>正在进入工作台</p>
             </div>
           )}
 
           {status === "error" && (
             <div className="w-48 h-48 flex flex-col items-center justify-center">
-              <p className="text-sm text-[var(--muted)] mb-3">二维码已过期</p>
+              <p className="text-sm mb-3" style={{ color: 'var(--text-tertiary)' }}>二维码已过期</p>
               <button onClick={getQR} className="btn btn-primary">重新获取</button>
             </div>
           )}

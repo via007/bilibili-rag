@@ -1,0 +1,1100 @@
+openapi: 3.0.3
+info:
+  title: Bilibili RAG API
+  description: |
+    Bilibili RAG - 把 B 站收藏夹变成可对话的知识库
+
+    ## 认证方式
+    - Cookie 认证：登录后获取 session_id
+    - Header 传递：`X-Session-Id: xxx`
+
+    ## 通用说明
+    - 所有 API 返回 JSON 格式
+    - 时间格式：ISO 8601
+  version: 1.0.0
+  contact:
+    name: Bilibili RAG
+
+servers:
+  - url: http://localhost:8000
+    description: 本地开发服务器
+
+tags:
+  - name: Auth
+    description: 认证相关
+  - name: Favorites
+    description: 收藏夹管理
+  - name: Knowledge
+    description: 知识库管理
+  - name: Chat
+    description: 对话问答
+  - name: Conversation
+    description: 会话管理
+  - name: Export
+    description: 导出功能
+  - name: Summary
+    description: 视频摘要
+  - name: Correction
+    description: ASR 纠错
+  - name: Config
+    description: 系统配置
+  - name: Clustering
+    description: 视频聚类
+  - name: LearningPath
+    description: 学习路径
+
+paths:
+  # ==================== Auth ====================
+  /auth/qrcode:
+    get:
+      tags: [Auth]
+      summary: 获取登录二维码
+      operationId: getQRCode
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QRCodeResponse'
+
+  /auth/qrcode/poll/{qrcode_key}:
+    get:
+      tags: [Auth]
+      summary: 轮询登录状态
+      operationId: pollLoginStatus
+      parameters:
+        - name: qrcode_key
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginStatusResponse'
+
+  /auth/session/{session_id}:
+    get:
+      tags: [Auth]
+      summary: 获取用户会话
+      operationId: getUserSession
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 成功
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      tags: [Auth]
+      summary: 删除用户会话（登出）
+      operationId: deleteUserSession
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 成功
+
+  # ==================== Favorites ====================
+  /favorites/list:
+    get:
+      tags: [Favorites]
+      summary: 获取收藏夹列表
+      operationId: getFavoriteList
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/FavoriteFolder'
+
+  /favorites/{media_id}/videos:
+    get:
+      tags: [Favorites]
+      summary: 获取收藏夹视频（分页）
+      operationId: getFavoriteVideos
+      parameters:
+        - name: media_id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: page_size
+          in: query
+          schema:
+            type: integer
+            default: 20
+      responses:
+        '200':
+          description: 成功
+
+  /favorites/{media_id}/all-videos:
+    get:
+      tags: [Favorites]
+      summary: 获取收藏夹所有视频
+      operationId: getAllVideos
+      parameters:
+        - name: media_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: 成功
+
+  /favorites/organize/preview:
+    post:
+      tags: [Favorites]
+      summary: 整理预览
+      operationId: organizePreview
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [media_id]
+              properties:
+                media_id:
+                  type: integer
+      responses:
+        '200':
+          description: 成功
+
+  /favorites/organize/execute:
+    post:
+      tags: [Favorites]
+      summary: 执行整理
+      operationId: organizeExecute
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [media_id, clusters]
+              properties:
+                media_id:
+                  type: integer
+                clusters:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      name:
+                        type: string
+                      bvids:
+                        type: array
+                        items:
+                          type: string
+      responses:
+        '200':
+          description: 成功
+
+  # ==================== Knowledge ====================
+  /knowledge/stats:
+    get:
+      tags: [Knowledge]
+      summary: 获取知识库统计
+      operationId: getKnowledgeStats
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KnowledgeStats'
+
+  /knowledge/folders/status:
+    get:
+      tags: [Knowledge]
+      summary: 获取收藏夹入库状态
+      operationId: getFolderStatus
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/FolderStatus'
+
+  /knowledge/folders/sync:
+    post:
+      tags: [Knowledge]
+      summary: 同步收藏夹
+      operationId: syncFolders
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [folder_ids]
+              properties:
+                folder_ids:
+                  type: array
+                  items:
+                    type: integer
+      responses:
+        '200':
+          description: 成功
+
+  /knowledge/build:
+    post:
+      tags: [Knowledge]
+      summary: 构建知识库
+      operationId: buildKnowledge
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [folder_ids]
+              properties:
+                folder_ids:
+                  type: array
+                  items:
+                    type: integer
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BuildTask'
+
+  /knowledge/build/status/{task_id}:
+    get:
+      tags: [Knowledge]
+      summary: 获取构建状态
+      operationId: getBuildStatus
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BuildStatus'
+
+  /knowledge/video/{bvid}/asr-status:
+    get:
+      tags: [Knowledge]
+      summary: 获取 ASR 状态
+      operationId: getASRStatus
+      parameters:
+        - name: bvid
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ASRStatus'
+
+  # ==================== Chat ====================
+  /chat/ask:
+    post:
+      tags: [Chat]
+      summary: 问答（非流式）
+      operationId: chatAsk
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatRequest'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatResponse'
+
+  /chat/ask/stream:
+    post:
+      tags: [Chat]
+      summary: 问答（流式）
+      operationId: chatAskStream
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatRequest'
+      responses:
+        '200':
+          description: 成功
+          content:
+            text/event-stream:
+              schema:
+                type: string
+
+  /chat/search:
+    post:
+      tags: [Chat]
+      summary: 语义检索
+      operationId: chatSearch
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [query]
+              properties:
+                query:
+                  type: string
+                folder_ids:
+                  type: array
+                  items:
+                    type: integer
+                top_k:
+                  type: integer
+                  default: 5
+      responses:
+        '200':
+          description: 成功
+
+  # ==================== Conversation ====================
+  /conversation/list:
+    get:
+      tags: [Conversation]
+      summary: 获取会话列表
+      operationId: getConversationList
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: page_size
+          in: query
+          schema:
+            type: integer
+            default: 20
+      responses:
+        '200':
+          description: 成功
+
+  /conversation/create:
+    post:
+      tags: [Conversation]
+      summary: 创建会话
+      operationId: createConversation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title:
+                  type: string
+                folder_ids:
+                  type: array
+                  items:
+                    type: integer
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatSession'
+
+  /conversation/{chat_session_id}:
+    get:
+      tags: [Conversation]
+      summary: 获取会话详情
+      operationId: getConversation
+      parameters:
+        - name: chat_session_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 成功
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    put:
+      tags: [Conversation]
+      summary: 更新会话
+      operationId: updateConversation
+      parameters:
+        - name: chat_session_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title:
+                  type: string
+      responses:
+        '200':
+          description: 成功
+
+    delete:
+      tags: [Conversation]
+      summary: 删除会话
+      operationId: deleteConversation
+      parameters:
+        - name: chat_session_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 成功
+
+  /conversation/{chat_session_id}/messages:
+    get:
+      tags: [Conversation]
+      summary: 获取消息列表
+      operationId: getMessages
+      parameters:
+        - name: chat_session_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 成功
+
+  # ==================== Export ====================
+  /export/video:
+    post:
+      tags: [Export]
+      summary: 导出视频
+      operationId: exportVideo
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExportVideoRequest'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExportResponse'
+
+  /export/folder:
+    post:
+      tags: [Export]
+      summary: 导出收藏夹
+      operationId: exportFolder
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExportFolderRequest'
+      responses:
+        '200':
+          description: 成功
+
+  /export/session:
+    post:
+      tags: [Export]
+      summary: 导出会话
+      operationId: exportSession
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExportSessionRequest'
+      responses:
+        '200':
+          description: 成功
+
+  /export/session-summary/{chat_session_id}:
+    get:
+      tags: [Export]
+      summary: 获取会话总结（缓存优先）
+      operationId: getSessionSummary
+      parameters:
+        - name: chat_session_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionSummaryResponse'
+
+    delete:
+      tags: [Export]
+      summary: 删除会话总结缓存
+      operationId: deleteSessionSummary
+      parameters:
+        - name: chat_session_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 成功
+
+  /export/session-summary/{chat_session_id}/refresh:
+    post:
+      tags: [Export]
+      summary: 重新生成会话总结
+      operationId: refreshSessionSummary
+      parameters:
+        - name: chat_session_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                format:
+                  type: string
+                  enum: [full, simple]
+                  default: full
+      responses:
+        '200':
+          description: 成功
+
+  # ==================== Summary ====================
+  /summary/{bvid}:
+    get:
+      tags: [Summary]
+      summary: 获取视频摘要
+      operationId: getVideoSummary
+      parameters:
+        - name: bvid
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VideoSummary'
+
+  /summary/generate:
+    post:
+      tags: [Summary]
+      summary: 生成视频摘要
+      operationId: generateSummary
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [bvid]
+              properties:
+                bvid:
+                  type: string
+      responses:
+        '200':
+          description: 成功
+
+  # ==================== Correction ====================
+  /correction/list:
+    get:
+      tags: [Correction]
+      summary: 获取纠错列表
+      operationId: getCorrectionList
+      responses:
+        '200':
+          description: 成功
+
+  /correction/{bvid}:
+    get:
+      tags: [Correction]
+      summary: 获取纠错详情
+      operationId: getCorrectionDetail
+      parameters:
+        - name: bvid
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 成功
+
+    post:
+      tags: [Correction]
+      summary: 提交纠错
+      operationId: submitCorrection
+      parameters:
+        - name: bvid
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [corrected_text]
+              properties:
+                corrected_text:
+                  type: string
+      responses:
+        '200':
+          description: 成功
+
+  # ==================== Config ====================
+  /config:
+    get:
+      tags: [Config]
+      summary: 获取配置
+      operationId: getConfig
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LLMConfig'
+
+    put:
+      tags: [Config]
+      summary: 更新配置
+      operationId: updateConfig
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LLMConfig'
+      responses:
+        '200':
+          description: 成功
+
+  # ==================== Clustering ====================
+  /clustering/{folder_id}:
+    get:
+      tags: [Clustering]
+      summary: 获取聚类结果
+      operationId: getClusters
+      parameters:
+        - name: folder_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Clusters'
+
+  /clustering/generate:
+    post:
+      tags: [Clustering]
+      summary: 生成聚类
+      operationId: generateClusters
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [folder_id]
+              properties:
+                folder_id:
+                  type: integer
+                force:
+                  type: boolean
+                  default: false
+      responses:
+        '200':
+          description: 成功
+
+  # ==================== Learning Path ====================
+  /learning-path/{folder_id}:
+    get:
+      tags: [LearningPath]
+      summary: 获取学习路径
+      operationId: getLearningPath
+      parameters:
+        - name: folder_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LearningPath'
+
+  /learning-path/generate:
+    post:
+      tags: [LearningPath]
+      summary: 生成学习路径
+      operationId: generateLearningPath
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [folder_id]
+              properties:
+                folder_id:
+                  type: integer
+      responses:
+        '200':
+          description: 成功
+
+components:
+  schemas:
+    # Common
+    ErrorResponse:
+      type: object
+      properties:
+        detail:
+          type: string
+
+    # Auth
+    QRCodeResponse:
+      type: object
+      properties:
+        url:
+          type: string
+        qrcode_key:
+          type: string
+
+    LoginStatusResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [pending, scanned, confirmed, expired]
+        message:
+          type: string
+        session_id:
+          type: string
+        cookie:
+          type: string
+
+    # Favorites
+    FavoriteFolder:
+      type: object
+      properties:
+        media_id:
+          type: integer
+        title:
+          type: string
+        count:
+          type: integer
+        is_default:
+          type: boolean
+
+    # Knowledge
+    KnowledgeStats:
+      type: object
+      properties:
+        total_videos:
+          type: integer
+        total_videos_processed:
+          type: integer
+        total_videos_asr:
+          type: integer
+        total_size_mb:
+          type: integer
+
+    FolderStatus:
+      type: object
+      properties:
+        media_id:
+          type: integer
+        media_count:
+          type: integer
+        indexed_count:
+          type: integer
+        last_sync_at:
+          type: string
+
+    BuildTask:
+      type: object
+      properties:
+        task_id:
+          type: string
+        status:
+          type: string
+
+    BuildStatus:
+      type: object
+      properties:
+        task_id:
+          type: string
+        status:
+          type: string
+          enum: [pending, running, completed, failed]
+        progress:
+          type: integer
+        current_step:
+          type: string
+
+    ASRStatus:
+      type: object
+      properties:
+        bvid:
+          type: string
+        asr_status:
+          type: string
+        asr_text:
+          type: string
+        duration:
+          type: integer
+
+    # Chat
+    ChatRequest:
+      type: object
+      required: [question]
+      properties:
+        question:
+          type: string
+        session_id:
+          type: string
+        folder_ids:
+          type: array
+          items:
+            type: integer
+        chat_session_id:
+          type: string
+
+    ChatResponse:
+      type: object
+      properties:
+        answer:
+          type: string
+        sources:
+          type: array
+          items:
+            type: object
+            properties:
+              bvid:
+                type: string
+              title:
+                type: string
+              url:
+                type: string
+        tokens_used:
+          type: integer
+
+    # Conversation
+    ChatSession:
+      type: object
+      properties:
+        chat_session_id:
+          type: string
+        title:
+          type: string
+
+    # Export
+    ExportVideoRequest:
+      type: object
+      required: [bvid]
+      properties:
+        bvid:
+          type: string
+        format:
+          type: string
+          enum: [full, simple]
+          default: full
+
+    ExportFolderRequest:
+      type: object
+      required: [folder_ids]
+      properties:
+        folder_ids:
+          type: array
+          items:
+            type: integer
+        format:
+          type: string
+          enum: [full, simple]
+          default: full
+
+    ExportSessionRequest:
+      type: object
+      required: [chat_session_id]
+      properties:
+        chat_session_id:
+          type: string
+
+    ExportResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        filename:
+          type: string
+        content:
+          type: string
+        size:
+          type: integer
+
+    SessionSummaryResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        has_cache:
+          type: boolean
+        regenerated:
+          type: boolean
+        data:
+          type: object
+          properties:
+            content:
+              type: string
+            version:
+              type: integer
+            source_video_count:
+              type: integer
+            message_count:
+              type: integer
+            created_at:
+              type: string
+            updated_at:
+              type: string
+
+    # Summary
+    VideoSummary:
+      type: object
+      properties:
+        bvid:
+          type: string
+        summary:
+          type: string
+        outline:
+          type: array
+          items:
+            type: object
+
+    # Config
+    LLMConfig:
+      type: object
+      properties:
+        llm_provider:
+          type: string
+        llm_model:
+          type: string
+        embedding_model:
+          type: string
+        temperature:
+          type: number
+
+    # Clustering
+    Clusters:
+      type: object
+      properties:
+        clusters:
+          type: array
+          items:
+            type: object
+            properties:
+              name:
+                type: string
+              bvids:
+                type: array
+                items:
+                  type: string
+              description:
+                type: string
+
+    # Learning Path
+    LearningPath:
+      type: object
+      properties:
+        folder_id:
+          type: integer
+        title:
+          type: string
+        levels:
+          type: array
+          items:
+            type: object
+
+  responses:
+    NotFound:
+      description: 资源不存在
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    ServerError:
+      description: 服务器错误
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'

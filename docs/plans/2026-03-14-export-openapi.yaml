@@ -1,0 +1,287 @@
+openapi: 3.0.3
+info:
+  title: Bilibili RAG 导出 API
+  description: |
+    知识点导出 API，支持视频、收藏夹、会话总结导出
+  version: 1.0.0
+  contact:
+    name: Bilibili RAG
+
+servers:
+  - url: http://localhost:8000
+    description: 本地服务器
+
+tags:
+  - name: 导出
+    description: 知识点导出相关接口
+
+paths:
+  /export/video:
+    post:
+      tags:
+        - 导出
+      summary: 导出单个视频
+      operationId: exportVideo
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExportVideoRequest'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExportResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /export/folder:
+    post:
+      tags:
+        - 导出
+      summary: 导出一个或多个收藏夹
+      operationId: exportFolder
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExportFolderRequest'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExportResponse'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /export/session:
+    post:
+      tags:
+        - 导出
+      summary: 导出会话（问答格式）
+      operationId: exportSession
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExportSessionRequest'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExportResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /export/session-summary/{chat_session_id}:
+    get:
+      tags:
+        - 导出
+      summary: 获取会话总结（缓存优先）
+      operationId: getSessionSummary
+      parameters:
+        - name: chat_session_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: 会话 ID
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionSummaryResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+    delete:
+      tags:
+        - 导出
+      summary: 删除会话总结缓存
+      operationId: deleteSessionSummary
+      parameters:
+        - name: chat_session_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: 会话 ID
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  message:
+                    type: string
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /export/session-summary/{chat_session_id}/refresh:
+    post:
+      tags:
+        - 导出
+      summary: 重新生成会话总结
+      operationId: refreshSessionSummary
+      parameters:
+        - name: chat_session_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: 会话 ID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshSessionSummaryRequest'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionSummaryResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+components:
+  schemas:
+    ExportVideoRequest:
+      type: object
+      required:
+        - bvid
+      properties:
+        bvid:
+          type: string
+          description: 视频 BV 号
+        format:
+          type: string
+          enum: [full, simple]
+          default: full
+          description: 导出格式
+
+    ExportFolderRequest:
+      type: object
+      required:
+        - folder_ids
+      properties:
+        folder_ids:
+          type: array
+          items:
+            type: integer
+          description: 收藏夹 ID 列表
+        format:
+          type: string
+          enum: [full, simple]
+          default: full
+          description: 导出格式
+
+    ExportSessionRequest:
+      type: object
+      required:
+        - chat_session_id
+      properties:
+        chat_session_id:
+          type: string
+          description: 会话 ID
+
+    RefreshSessionSummaryRequest:
+      type: object
+      properties:
+        format:
+          type: string
+          enum: [full, simple]
+          default: full
+          description: 导出格式
+
+    ExportResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        filename:
+          type: string
+        content:
+          type: string
+        size:
+          type: integer
+          description: 内容大小（字节）
+
+    SessionSummaryResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        has_cache:
+          type: boolean
+          description: 是否有缓存
+        regenerated:
+          type: boolean
+          description: 是否重新生成
+        data:
+          type: object
+          properties:
+            content:
+              type: string
+              description: Markdown 内容
+            version:
+              type: integer
+              description: 缓存版本号
+            source_video_count:
+              type: integer
+              description: 关联视频数
+            message_count:
+              type: integer
+              description: 对话轮次
+            created_at:
+              type: string
+              format: date-time
+            updated_at:
+              type: string
+              format: date-time
+
+    ErrorResponse:
+      type: object
+      properties:
+        detail:
+          type: string
+
+  responses:
+    NotFound:
+      description: 资源不存在
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    ServerError:
+      description: 服务器内部错误
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'

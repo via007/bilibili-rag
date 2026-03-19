@@ -1,7 +1,7 @@
 """
 Bilibili RAG 知识库系统
 
-视频内容获取服务 - 二级降级策略
+视频内容获取服务 - 二级降级策略 + 本地/云端 ASR 混合
 """
 from typing import Optional
 from urllib.parse import urlparse
@@ -16,30 +16,42 @@ from loguru import logger
 from app.models import VideoContent, ContentSource
 from app.services.bilibili import BilibiliService
 from app.services.asr import ASRService
+from app.services.asr_local import get_local_asr_service, ASRResult as LocalASRResult
+from app.services.asr_quality import get_asr_quality_service, QualityReport
+from app.config import settings
 
 
 class ContentFetcher:
     """
     视频内容获取器
-    
+
     采用二级降级策略：
-    1. 音频转写（ASR）
+    1. 音频转写（ASR）- 支持本地/云端混合
     2. 视频基本信息 (兜底)
     """
-    
+
     def __init__(self, bilibili_service: BilibiliService, asr_service: ASRService):
         self.bili = bilibili_service
         self.asr = asr_service
+        # 本地 ASR 服务实例（按需初始化）
+        self._local_asr = None
+        self._asr_mode = settings.asr_mode
+
+    def _get_local_asr(self):
+        """获取本地 ASR 服务实例"""
+        if self._local_asr is None:
+            self._local_asr = get_local_asr_service()
+        return self._local_asr
     
     async def fetch_content(self, bvid: str, cid: int = None, title: str = None) -> VideoContent:
         """
         获取视频内容，自动降级
-        
+
         Args:
             bvid: 视频 BV 号
             cid: 视频 cid (如果没有会自动获取)
             title: 视频标题 (如果没有会自动获取)
-            
+
         Returns:
             VideoContent 对象
         """
@@ -60,22 +72,62 @@ class ContentFetcher:
                     content="无法获取视频信息",
                     source=ContentSource.BASIC_INFO
                 )
-        
+
         description = video_info.get("desc", "") if video_info else ""
-        
+
         # Level 1: 跳过 AI 摘要，优先使用 ASR
         logger.info(f"[{bvid}] 已跳过 AI 摘要，优先使用 ASR")
 
-        asr_text = await self._try_asr(bvid, cid)
+        asr_text, asr_result = await self._try_asr(bvid, cid)
+
+        # 质量评估
+        quality_score = None
+        quality_flags = None
+        asr_model = None
+        confidence_avg = None
+        confidence_min = None
+        audio_duration = None
+        audio_quality = None
+        speech_ratio = None
+        word_count = None
+
+        if asr_result:
+            # 本地 ASR 有详细结果，进行质量评估
+            try:
+                quality_service = get_asr_quality_service()
+                quality_report: QualityReport = await quality_service.evaluate(asr_result)
+                quality_score = quality_report.quality_score
+                quality_flags = quality_report.flags
+                asr_model = "local"
+                confidence_avg = quality_report.confidence_avg
+                confidence_min = quality_report.confidence_min
+                audio_quality = quality_report.audio_quality
+                speech_ratio = quality_report.speech_ratio
+                # 从 asr_result 获取额外信息
+                audio_duration = asr_result.duration
+                word_count = asr_result.word_count
+                logger.info(f"[{bvid}] ASR 质量评估: score={quality_score:.2f}, flags={quality_flags}")
+            except Exception as e:
+                logger.warning(f"[{bvid}] ASR 质量评估失败: {e}")
+
         if asr_text:
             logger.info(f"[{bvid}] 使用 ASR 文本")
             return VideoContent(
                 bvid=bvid,
                 title=title,
                 content=asr_text,
-                source=ContentSource.ASR
+                source=ContentSource.ASR,
+                asr_quality_score=quality_score,
+                asr_quality_flags=quality_flags,
+                asr_model=asr_model,
+                confidence_avg=confidence_avg,
+                confidence_min=confidence_min,
+                audio_duration=audio_duration,
+                audio_quality=audio_quality,
+                speech_ratio=speech_ratio,
+                word_count=word_count,
             )
-        
+
         # ASR 失败时，补齐基础信息（避免遗漏简介）
         if not video_info:
             try:
@@ -91,7 +143,7 @@ class ContentFetcher:
         basic_content = f"视频标题：{title}"
         if description:
             basic_content += f"\n\n视频简介：{description}"
-        
+
         return VideoContent(
             bvid=bvid,
             title=title,
@@ -99,29 +151,116 @@ class ContentFetcher:
             source=ContentSource.BASIC_INFO
         )
 
-    async def _try_asr(self, bvid: str, cid: int) -> Optional[str]:
-        """尝试进行音频转写"""
+    async def _try_asr(self, bvid: str, cid: int) -> tuple[Optional[str], Optional[LocalASRResult]]:
+        """尝试进行音频转写，支持本地/云端混合模式
+
+        Returns:
+            (text, asr_result): 文本和本地 ASR 结果（如果有）
+        """
         try:
             audio_url = await self.bili.get_audio_url(bvid, cid)
             if not audio_url:
                 logger.info(f"[{bvid}] 未获取到音频 URL")
-                return None
+                return None, None
+
+            # 优先尝试本地 ASR（ASR_MODE=local 或 auto）
+            if self._asr_mode in ("local", "auto"):
+                local_result = await self._try_local_asr(bvid, audio_url)
+                if local_result and local_result.text and len(local_result.text) >= 50:
+                    preview = local_result.text[:120].replace("\n", " ").strip()
+                    logger.info(f"[{bvid}] 本地 ASR 成功，长度={len(local_result.text)}，预览：{preview}")
+                    return local_result.text, local_result
+                elif self._asr_mode == "local":
+                    # 纯本地模式失败则返回 None
+                    logger.info(f"[{bvid}] 本地 ASR 失败（ASR_MODE=local）")
+                    return None, None
+
+            # 云端 ASR（ASR_MODE=cloud 或 auto 模式本地失败后的兜底）
+            cloud_text = await self._try_cloud_asr(bvid, cid, audio_url)
+            return cloud_text, None
+        except Exception as e:
+            logger.warning(f"[{bvid}] ASR 失败: {e}")
+            return None, None
+
+    async def _try_local_asr(self, bvid: str, audio_url: str) -> Optional[LocalASRResult]:
+        """尝试使用本地 ASR"""
+        local_asr = self._get_local_asr()
+        if not local_asr:
+            logger.info(f"[{bvid}] 本地 ASR 服务不可用")
+            return None
+
+        try:
+            # 探测音频 URL 可达性
             status = await self._probe_audio_url(bvid, audio_url)
             if status is not None and status < 400:
-                logger.info(f"[{bvid}] 音频 URL 可达，使用 Transcription")
+                # 音频 URL 可达，下载后转写
+                logger.info(f"[{bvid}] 本地 ASR：音频 URL 可达，下载后转写")
+                # 下载音频到临时文件
+                tmp_dir = os.path.join("data", "asr_tmp")
+                os.makedirs(tmp_dir, exist_ok=True)
+
+                from urllib.parse import urlparse
+                parsed = urlparse(audio_url)
+                ext = os.path.splitext(parsed.path)[1] or ".m4s"
+                filename = f"{bvid}_{int(time.time())}{ext}"
+                file_path = os.path.join(tmp_dir, filename)
+
+                ok = await self.bili.download_audio_to_file(audio_url, file_path)
+                if not ok or not os.path.exists(file_path):
+                    logger.info(f"[{bvid}] 本地 ASR：音频下载失败")
+                    return None
+
+                # 转码为 wav（提高兼容性）
+                wav_path = self._transcode_audio_to_wav(bvid, file_path)
+                if wav_path:
+                    # 清理原始文件
+                    try:
+                        os.remove(file_path)
+                    except Exception:
+                        pass
+                    file_path = wav_path
+
+                # 本地转写
+                result: Optional[LocalASRResult] = await local_asr.transcribe(file_path)
+                if result and result.text:
+                    # 清理临时文件
+                    try:
+                        os.remove(file_path)
+                    except Exception:
+                        pass
+                    return result
+                else:
+                    # 本地转写失败，清理文件
+                    try:
+                        os.remove(file_path)
+                    except Exception:
+                        pass
+            else:
+                logger.info(f"[{bvid}] 本地 ASR：音频 URL 不可达")
+        except Exception as e:
+            logger.warning(f"[{bvid}] 本地 ASR 失败: {e}")
+
+        return None
+
+    async def _try_cloud_asr(self, bvid: str, cid: int, audio_url: str) -> Optional[str]:
+        """尝试使用云端 ASR"""
+        try:
+            status = await self._probe_audio_url(bvid, audio_url)
+            if status is not None and status < 400:
+                logger.info(f"[{bvid}] 云端 ASR：音频 URL 可达，使用 Transcription")
                 text = await self.asr.transcribe_url(audio_url)
             else:
-                logger.info(f"[{bvid}] 音频 URL 不可达，使用 Recognition 兜底")
+                logger.info(f"[{bvid}] 云端 ASR：音频 URL 不可达，使用 Recognition 兜底")
                 text = await self._try_asr_with_local_audio(bvid, cid, audio_url)
 
             if not text or len(text) < 50:
-                logger.info(f"[{bvid}] ASR 内容过少")
+                logger.info(f"[{bvid}] 云端 ASR 内容过少")
                 return None
             preview = text[:120].replace("\n", " ").strip()
-            logger.info(f"[{bvid}] ASR 成功，长度={len(text)}，预览：{preview}")
+            logger.info(f"[{bvid}] 云端 ASR 成功，长度={len(text)}，预览：{preview}")
             return text
         except Exception as e:
-            logger.warning(f"[{bvid}] ASR 失败: {e}")
+            logger.warning(f"[{bvid}] 云端 ASR 失败: {e}")
             return None
 
     async def _probe_audio_url(self, bvid: str, audio_url: str) -> Optional[int]:

@@ -5,15 +5,15 @@ RAG 服务模块 - 向量存储与问答
 """
 from typing import List, Optional
 from loguru import logger
-from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_chroma import Chroma
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.schema import Document
-from langchain.prompts import ChatPromptTemplate
-from langchain.schema.runnable import RunnablePassthrough
-from langchain.schema.output_parser import StrOutputParser
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_core.documents import Document
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import RunnablePassthrough
+from langchain_core.output_parsers import StrOutputParser
 from app.config import settings
 from app.models import VideoContent
+from app.services.llm_factory import get_llm_client, get_embeddings_client
 
 
 class RAGService:
@@ -35,36 +35,19 @@ class RAGService:
         """
         self.collection_name = collection_name
         
-        # 初始化 Embeddings (使用 DashScope 原生支持)
-        try:
-            from langchain_community.embeddings import DashScopeEmbeddings
-            self.embeddings = DashScopeEmbeddings(
-                dashscope_api_key=settings.openai_api_key,
-                model=settings.embedding_model
-            )
-            logger.info("使用 DashScopeEmbeddings 初始化成功")
-        except ImportError:
-            self.embeddings = OpenAIEmbeddings(
-                api_key=settings.openai_api_key,
-                base_url=settings.openai_base_url,
-                model=settings.embedding_model,
-                check_embedding_ctx_length=False
-            )
-        
+        # 初始化 Embeddings (使用工厂函数)
+        self.embeddings = get_embeddings_client()
+        logger.info("使用工厂函数初始化 Embeddings 成功")
+
         # 初始化向量存储
         self.vectorstore = Chroma(
             collection_name=collection_name,
             embedding_function=self.embeddings,
             persist_directory=settings.chroma_persist_directory
         )
-        
-        # 初始化 LLM
-        self.llm = ChatOpenAI(
-            api_key=settings.openai_api_key,
-            base_url=settings.openai_base_url,
-            model=settings.llm_model,
-            temperature=0.5
-        )
+
+        # 初始化 LLM (使用工厂函数)
+        self.llm = get_llm_client(temperature=0.5)
         
         # 文本分割器
         self.text_splitter = RecursiveCharacterTextSplitter(
@@ -73,20 +56,59 @@ class RAGService:
             separators=["\n\n", "\n", "。", "！", "？", ".", "!", "?", " "]
         )
         
-        # 问答提示模板
+        # 问答提示模板 - 支持多路召回和引用
         self.qa_prompt = ChatPromptTemplate.from_messages([
-            ("system", """你是一个知识库助手，专门基于用户收藏的 B站视频内容来回答问题。
+            ("system", """你是一个专业、友好的知识库助手。你的任务是基于用户收藏的B站视频内容，帮助用户解答问题、学习知识。
 
-请遵循以下规则：
-1. 根据提供的视频内容来回答问题
-2. 回答要自然、友好、有条理
-3. 可以引用相关的视频标题作为来源
-4. 如果多个视频涉及相同话题，请综合它们的内容
+## 核心原则
+1. **准确引用**：必须基于提供的视频内容回答，每句话都要有依据
+2. **清晰结构**：回答要有逻辑层次，便于理解
+3. **友好态度**：像朋友交流一样自然、有帮助
 
-视频内容：
+## 视频内容（已检索到的相关知识）
 {context}
-"""),
-            ("human", "{question}")
+
+## 历史对话（用于理解上下文）
+{history}
+
+## 回答要求
+
+### 1. 分析问题
+先理解用户真正想知道什么，如果问题模糊，可以先确认用户意图。
+
+### 2. 回答结构
+请按以下结构回答：
+
+**直接回答**
+用最简洁的语言直接回答用户问题，不要绕弯子。
+
+**详细解释**
+- 解释"为什么"：背后的原理和原因
+- 提供背景：帮助理解的知识储备
+- 适当举例：用具体例子说明抽象概念
+
+**补充信息**
+- 相关的注意事项
+- 扩展知识或进阶内容
+- 如果适用，推荐相关视频
+
+### 3. 引用标注（重要！）
+- 每引用一个视频内容，用【来源N】标注，N是内容对应的编号
+- 标注位置：引用的观点或信息后立即标注
+- 示例：这个问题涉及多个知识点【来源1】【来源3】，而另一个观点则认为...【来源2】
+
+### 4. 回答风格
+- 避免过于正式或机械，保持自然对话感
+- 专业技术内容要准确，日常话题可以轻松些
+- 不要过度展开，保持重点清晰
+
+### 5. 特殊情况处理
+- 如果知识库中没有相关内容：明确告知用户，并提供合理建议
+- 如果问题超出内容范围：基于常识回答，同时说明这一点
+- 如果用户追问：结合前文上下文理解真正意图
+
+请开始回答："""),
+            ("human", "问题：{question}")
         ])
         
         # 无内容时的通用回复模板
@@ -259,11 +281,11 @@ class RAGService:
     async def _fallback_answer(self, question: str, reason: str = "") -> dict:
         """
         当没有检索到内容时，让 AI 自然回复
-        
+
         Args:
             question: 用户问题
             reason: 原因说明
-            
+
         Returns:
             回答结果
         """
@@ -274,7 +296,7 @@ class RAGService:
                 | self.llm
                 | StrOutputParser()
             )
-            
+
             answer = await chain.ainvoke(question)
             return {
                 "answer": answer,
@@ -287,15 +309,49 @@ class RAGService:
                 "sources": []
             }
 
-    async def answer_question(self, question: str, k: int = 5, bvids: Optional[List[str]] = None) -> dict:
+    def _format_history(self, history: Optional[List[dict]]) -> str:
+        """
+        格式化历史对话为字符串
+
+        Args:
+            history: 历史对话列表 [{"role": "user"/"assistant", "content": "..."}]
+
+        Returns:
+            格式化的历史对话字符串
+        """
+        if not history:
+            return "无历史对话"
+
+        formatted = []
+        for msg in history[-10:]:  # 最多保留最近10条对话
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+
+            if role == "user":
+                formatted.append(f"用户: {content}")
+            else:
+                # 简化 assistant 回复，去除引用标注
+                simplified = content.split("【来源")[0] if content else ""
+                formatted.append(f"助手: {simplified}")
+
+        return "\n".join(formatted)
+
+    async def answer_question(
+        self,
+        question: str,
+        k: int = 5,
+        bvids: Optional[List[str]] = None,
+        history: Optional[List[dict]] = None
+    ) -> dict:
         """
         回答问题
-        
+
         Args:
             question: 用户问题
             k: 检索文档数量
             bvids: 可选，限制在这些视频范围内搜索
-            
+            history: 可选，会话历史 [{"role": "user"/"assistant", "content": "..."}]
+
         Returns:
             {
                 "answer": 回答内容,
@@ -348,23 +404,30 @@ class RAGService:
             }
         
         context = "\n\n---\n\n".join(context_parts)
-        
+
         # 确保 context 不为空
         if not context.strip():
             return {
                 "answer": "没有找到可用的内容来回答您的问题。",
                 "sources": sources
             }
-        
+
+        # 构建历史对话字符串
+        history_str = self._format_history(history) if history else "无历史对话"
+
         # 构建链并执行
         try:
             chain = (
-                {"context": lambda _: context, "question": RunnablePassthrough()}
+                {
+                    "context": lambda _: context,
+                    "history": lambda _: history_str,
+                    "question": RunnablePassthrough()
+                }
                 | self.qa_prompt
                 | self.llm
                 | StrOutputParser()
             )
-            
+
             answer = await chain.ainvoke(question)
             
             return {
@@ -445,13 +508,21 @@ class RAGService:
     def delete_video(self, bvid: str):
         """
         删除指定视频的所有文档块
-        
+
         Args:
             bvid: 视频 BV 号
         """
         try:
-            self.vectorstore._collection.delete(where={"bvid": bvid})
-            logger.info(f"已删除视频: {bvid}")
+            # 获取该视频的所有文档 ID
+            collection = self.vectorstore._collection
+            results = collection.get(where={"bvid": bvid}, include=["ids"])
+
+            if results and results.get("ids"):
+                # 根据 ID 删除文档
+                collection.delete(ids=results["ids"])
+                logger.info(f"已删除视频 {bvid} 的 {len(results['ids'])} 个文档块")
+            else:
+                logger.info(f"视频 {bvid} 在向量库中不存在")
         except Exception as e:
             logger.error(f"删除视频失败 [{bvid}]: {e}")
             raise

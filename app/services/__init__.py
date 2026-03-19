@@ -8,11 +8,16 @@ from app.services.content_fetcher import ContentFetcher
 from app.services.asr import ASRService
 from app.services.rag import RAGService
 from app.services.wbi import wbi_signer
+from app.services.clustering import TopicClusteringService, VideoSummary, TopicCluster, get_clustering_service
 
 __all__ = [
     "BilibiliService",
-    "ContentFetcher", 
+    "ContentFetcher",
     "ASRService",
     "RAGService",
-    "wbi_signer"
+    "wbi_signer",
+    "TopicClusteringService",
+    "VideoSummary",
+    "TopicCluster",
+    "get_clustering_service"
 ]
