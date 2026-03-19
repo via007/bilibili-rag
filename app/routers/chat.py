@@ -4,6 +4,7 @@ Bilibili RAG 知识库系统
 """
 import re
 import json
+from decimal import Decimal, ROUND_HALF_UP
 from typing import List, Optional
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import StreamingResponse
@@ -19,6 +20,58 @@ from app.config import settings
 from app.routers.knowledge import get_rag_service
 
 router = APIRouter(prefix="/chat", tags=["对话"])
+
+
+def _resolve_model_prices(model_name: str) -> tuple[Decimal, Decimal, str]:
+    """按模型解析单价，未配置时按 0 计费并标记缺失。"""
+    model_cfg = settings.llm_model_prices.get(model_name)
+    if isinstance(model_cfg, dict):
+        input_price = model_cfg.get("input", Decimal("0"))
+        output_price = model_cfg.get("output", Decimal("0"))
+        if isinstance(input_price, Decimal) and isinstance(output_price, Decimal):
+            return input_price, output_price, "model_specific"
+
+    return Decimal("0"), Decimal("0"), "model_price_missing"
+
+
+def _fmt_decimal(value: Decimal) -> str:
+    """统一格式化金额和单价，避免科学计数法。"""
+    return str(value.quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP))
+
+
+def _log_llm_usage(scene: str, response) -> None:
+    """记录 LLM 用量与预估费用。"""
+    usage = getattr(response, "usage", None)
+    if not usage:
+        logger.info(f"LLM用量[{scene}]：未返回 usage 信息")
+        return
+
+    prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+    completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+    total_tokens = int(getattr(usage, "total_tokens", prompt_tokens + completion_tokens) or 0)
+    model_name = getattr(response, "model", None) or settings.llm_model
+    input_price, output_price, price_source = _resolve_model_prices(model_name)
+
+    input_cost = (Decimal(prompt_tokens) / Decimal("1000000")) * input_price
+    output_cost = (Decimal(completion_tokens) / Decimal("1000000")) * output_price
+    total_cost = input_cost + output_cost
+
+    logger.info(
+        "LLM用量[{}] model={} prompt_tokens={} completion_tokens={} total_tokens={} "
+        "price_source={} price_input_per_1m={} price_output_per_1m={} "
+        "cost_input={} cost_output={} cost_total={}",
+        scene,
+        model_name,
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+        price_source,
+        _fmt_decimal(input_price),
+        _fmt_decimal(output_price),
+        _fmt_decimal(input_cost),
+        _fmt_decimal(output_cost),
+        _fmt_decimal(total_cost),
+    )
 
 def _get_llm_client() -> OpenAI:
     """获取 LLM 客户端"""
@@ -200,6 +253,7 @@ def _route_with_llm(question: str) -> tuple[Optional[str], str]:
             ],
             temperature=0,
         )
+        _log_llm_usage("route", resp)
         text = (resp.choices[0].message.content or "").strip()
         match = re.search(r"(direct|db_list|db_content|vector)", text)
         return (match.group(1) if match else None), text
@@ -474,6 +528,7 @@ async def ask_question(request: ChatRequest, db: AsyncSession = Depends(get_db))
         messages, sources, _ = await _prepare_messages(request, db)
         client = _get_llm_client()
         response = client.chat.completions.create(model=settings.llm_model, messages=messages, temperature=0.5)
+        _log_llm_usage("ask", response)
         return ChatResponse(answer=response.choices[0].message.content or "", sources=sources[:5])
     except HTTPException: raise
     except Exception as e:

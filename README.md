@@ -147,6 +147,28 @@ npm run dev
 - 部署/测试阶段先用 **短视频（约 10 分钟）**验证流程与费用  
 - 正式使用按需启用，注意费用；大多数模型有免费额度，通常足够日常使用  
 
+### 按模型配置单价与费用日志
+
+项目支持按模型记录 Token 用量与预估费用（每 1M tokens 单价）。
+
+在 `.env` 中配置：
+
+```bash
+LLM_MODEL_PRICES_JSON={"qwen3.5-plus":{"input":0.8,"output":2.0},"qwen3.5-flash":{"input":0.3,"output":0.6}}
+```
+
+说明：
+- `input`：输入 tokens 的每 1M 单价  
+- `output`：输出 tokens 的每 1M 单价  
+- 日志中会优先读取实际响应模型名（`response.model`）匹配单价  
+- 若当前模型没有配置单价，会记录 `price_source=model_price_missing` 并按 0 计算  
+
+日志示例：
+
+```text
+LLM用量[ask] model=qwen3.5-plus prompt_tokens=1260 completion_tokens=315 total_tokens=1575 price_source=model_specific price_input_per_1m=0.800000 price_output_per_1m=2.000000 cost_input=0.001008 cost_output=0.000630 cost_total=0.001638
+```
+
 ---
 
 ## 🧩 技术栈
