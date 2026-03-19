@@ -30,7 +30,44 @@
 
 ---
 
-## ⚡ 快速开始（3 步）
+## 🐳 Docker 部署（推荐）
+
+使用 Docker Compose 一键启动，无需手动安装依赖：
+
+```bash
+# 1. 配置环境变量
+cp .env.example .env
+# 编辑 .env，填写 DASHSCOPE_API_KEY
+
+# 2. 启动服务
+docker-compose up -d
+
+# 3. 访问应用
+# 前端：http://localhost:3000
+# 后端文档：http://localhost:8000/docs
+
+# 查看日志
+docker-compose logs -f
+
+# 停止服务
+docker-compose down
+```
+
+**优势**：
+- ✅ 自动安装 ffmpeg 等系统依赖
+- ✅ 前后端独立容器，易于扩展
+- ✅ 数据持久化（./data 和 ./logs 目录）
+- ✅ 支持健康检查和自动重启
+- ✅ 方便在 VPS 上部署，供 OpenClaw 调用
+
+**注意事项**：
+- 首次构建需要 10-15 分钟（下载基础镜像 + 安装依赖）
+- 中国大陆用户建议配置 Docker 镜像加速器或使用代理
+- 数据保存在 `./data` 目录，删除容器不会丢失数据
+
+---
+
+## ⚡ 本地开发部署（3 步）
 
 0) 安装 ffmpeg（并确保在 PATH 中）  
 - macOS: `brew install ffmpeg`  
