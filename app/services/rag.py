@@ -454,7 +454,7 @@ class RAGService:
     def delete_video(self, bvid: str):
         """
         删除指定视频的所有文档块
-        
+
         Args:
             bvid: 视频 BV 号
         """
@@ -464,3 +464,42 @@ class RAGService:
         except Exception as e:
             logger.error(f"删除视频失败 [{bvid}]: {e}")
             raise
+
+    def delete_page_vectors(self, bvid: str, page_index: int):
+        """
+        删除指定分P的所有文档块
+
+        Args:
+            bvid: 视频 BV 号
+            page_index: 分P序号（0-based）
+        """
+        try:
+            self.vectorstore._collection.delete(where={
+                "$and": [{"bvid": bvid}, {"page_index": page_index}],
+            })
+            logger.info(f"已删除分P向量: {bvid} P{page_index + 1}")
+        except Exception as e:
+            logger.error(f"删除分P向量失败 [{bvid} P{page_index + 1}]: {e}")
+            raise
+
+    def get_page_vector_count(self, bvid: str, page_index: int) -> int:
+        """
+        获取指定分P的向量块数量
+
+        Args:
+            bvid: 视频 BV 号
+            page_index: 分P序号（0-based）
+
+        Returns:
+            向量块数量
+        """
+        try:
+            result = self.vectorstore._collection.get(
+                where={"$and": [{"bvid": bvid}, {"page_index": page_index}]},
+                include=[]
+            )
+            count = len(result.get("ids", []))
+            return count
+        except Exception as e:
+            logger.warning(f"获取分P向量数量失败 [{bvid} P{page_index + 1}]: {e}")
+            return 0
