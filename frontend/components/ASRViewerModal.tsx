@@ -3,8 +3,10 @@
 import { useState, useEffect, useCallback } from "react";
 import {
   asrApi,
+  vecPageApi,
   ASRContentResponse,
   ASRTaskStatus,
+  VectorPageStatusResponse,
 } from "@/lib/api";
 
 interface ASRViewerModalProps {
@@ -12,7 +14,9 @@ interface ASRViewerModalProps {
   onClose: () => void;
   bvid: string;
   cid: number;
+  pageIndex: number;
   pageTitle: string;
+  onVectorizationDone?: (bvid: string, cid: number, status: VectorPageStatusResponse) => void;
 }
 
 type ModalMode = "view" | "edit" | "loading" | "saving";
@@ -22,7 +26,9 @@ export default function ASRViewerModal({
   onClose,
   bvid,
   cid,
+  pageIndex,
   pageTitle,
+  onVectorizationDone,
 }: ASRViewerModalProps) {
   const [mode, setMode] = useState<ModalMode>("loading");
   const [content, setContent] = useState<string>("");
@@ -32,6 +38,22 @@ export default function ASRViewerModal({
   const [isProcessed, setIsProcessed] = useState<boolean>(false);
   const [taskStatus, setTaskStatus] = useState<ASRTaskStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // 向量化状态
+  const [vecStatus, setVecStatus] = useState<VectorPageStatusResponse | null>(null);
+  const [vecError, setVecError] = useState<string | null>(null);
+  const [isVecLoading, setIsVecLoading] = useState(false);
+
+  // 加载向量状态
+  const loadVecStatus = useCallback(async () => {
+    try {
+      const status = await vecPageApi.getStatus(bvid, cid);
+      setVecStatus(status);
+      setVecError(status.vector_error || null);
+    } catch {
+      // 向量状态获取失败不影响主流程
+    }
+  }, [bvid, cid]);
 
   // 加载内容
   const loadContent = useCallback(async () => {
@@ -63,8 +85,9 @@ export default function ASRViewerModal({
   useEffect(() => {
     if (isOpen) {
       loadContent();
+      loadVecStatus();
     }
-  }, [isOpen, loadContent]);
+  }, [isOpen, loadContent, loadVecStatus]);
 
   // 轮询任务状态
   const pollStatus = useCallback(async (taskId: string) => {
@@ -91,16 +114,64 @@ export default function ASRViewerModal({
       const res = await asrApi.create({
         bvid,
         cid,
-        page_index: 0,
+        page_index: pageIndex,
         page_title: pageTitle,
       });
       if (res.task_id) {
         pollStatus(res.task_id);
       } else {
+        // 已是最新（幂等返回 task_id=null）
         await loadContent();
       }
     } catch (e) {
-      setError("ASR 启动失败");
+      setError(e instanceof Error ? e.message : "ASR 启动失败");
+    }
+  };
+
+  // 向量化
+  const handleVectorize = async () => {
+    setVecError(null);
+    try {
+      const resp = await vecPageApi.create({
+        bvid,
+        cid,
+        page_index: pageIndex,
+        page_title: pageTitle,
+      });
+      if (resp.task_id) {
+        setIsVecLoading(true);
+        for (let i = 0; i < 60; i++) {
+          await new Promise((r) => setTimeout(r, 1000));
+          const taskStatus = await vecPageApi.getTaskStatus(resp.task_id);
+          if (taskStatus.status === "done") {
+            const newStatus = await vecPageApi.getStatus(bvid, cid);
+            setVecStatus(newStatus);
+            onVectorizationDone?.(bvid, cid, newStatus);
+            setIsVecLoading(false);
+            return;
+          }
+          if (taskStatus.status === "failed") {
+            setVecError(taskStatus.message);
+            const latestStatus = await vecPageApi.getStatus(bvid, cid);
+            setVecStatus(latestStatus);
+            onVectorizationDone?.(bvid, cid, latestStatus);
+            setIsVecLoading(false);
+            return;
+          }
+        }
+        setVecError("向量化超时");
+        setIsVecLoading(false);
+        const latestStatus = await vecPageApi.getStatus(bvid, cid);
+        setVecStatus(latestStatus);
+        onVectorizationDone?.(bvid, cid, latestStatus);
+      } else {
+        await loadVecStatus();
+        const latestStatus = await vecPageApi.getStatus(bvid, cid);
+        setVecStatus(latestStatus);
+        onVectorizationDone?.(bvid, cid, latestStatus);
+      }
+    } catch {
+      setVecError("向量化请求失败");
     }
   };
 
@@ -108,7 +179,7 @@ export default function ASRViewerModal({
   const handleReasr = async () => {
     setError(null);
     try {
-      const res = await asrApi.reasr({ bvid, cid });
+      const res = await asrApi.reasr({ bvid, cid, page_index: pageIndex });
       if (res.task_id) {
         pollStatus(res.task_id);
       }
@@ -122,7 +193,7 @@ export default function ASRViewerModal({
     setMode("saving");
     setError(null);
     try {
-      await asrApi.update({ bvid, cid, content: editContent });
+      await asrApi.update({ bvid, cid, page_index: pageIndex, content: editContent });
       await loadContent();
     } catch (e) {
       setError("保存失败");
@@ -145,6 +216,9 @@ export default function ASRViewerModal({
     setIsProcessed(false);
     setTaskStatus(null);
     setError(null);
+    setVecStatus(null);
+    setVecError(null);
+    setIsVecLoading(false);
     onClose();
   };
 
@@ -168,14 +242,43 @@ export default function ASRViewerModal({
           <span>状态: {isProcessed ? "已处理" : "未处理"}</span>
           {taskStatus && (
             <span className="text-[var(--accent)]">
-              {taskStatus.status === "processing" && `处理中: ${taskStatus.progress}%`}
-              {taskStatus.status === "pending" && "等待中..."}
+              {taskStatus.status === "processing" && `ASR: ${taskStatus.message}`}
+              {taskStatus.status === "pending" && `ASR: ${taskStatus.message}`}
+              {taskStatus.status === "done" && "ASR完成"}
+              {taskStatus.status === "failed" && `ASR失败: ${taskStatus.message}`}
             </span>
           )}
           {mode === "view" && isProcessed && (
             <button className="modal-reasr-btn" onClick={handleReasr}>
               重新ASR
             </button>
+          )}
+          {/* 向量化状态 pill */}
+          <span
+            className={`status-pill ${
+              vecStatus?.is_vectorized === "done"
+                ? "ok"
+                : vecStatus?.is_vectorized === "failed"
+                ? "error"
+                : vecStatus?.is_vectorized === "processing"
+                ? "partial"
+                : "empty"
+            }`}
+          >
+            向量:{" "}
+            {vecStatus?.is_vectorized === "done"
+              ? `已入库(${vecStatus.vector_chunk_count}块)`
+              : vecStatus?.is_vectorized === "failed"
+              ? "失败"
+              : vecStatus?.is_vectorized === "processing"
+              ? "处理中"
+              : "未处理"}
+          </span>
+          {isVecLoading && <span className="text-[var(--accent)]">向量化中...</span>}
+          {vecError && (
+            <span className="text-xs text-red-500" title={vecError}>
+              ⚠ {vecError.slice(0, 30)}
+            </span>
           )}
         </div>
 
@@ -219,6 +322,35 @@ export default function ASRViewerModal({
 
         {/* 底部按钮 */}
         <div className="modal-footer">
+          {mode === "view" && !isVecLoading && (
+            <button
+              className="modal-vector-btn"
+              onClick={handleVectorize}
+              style={{
+                marginRight: "auto",
+                padding: "8px 20px",
+                fontSize: "14px",
+                background: "var(--accent, #00a1d6)",
+                color: "white",
+                border: "none",
+                borderRadius: "6px",
+                cursor: "pointer",
+              }}
+            >
+              {!isProcessed
+                ? "ASR+Vector"
+                : vecStatus?.is_vectorized === "done"
+                ? "Revector"
+                : vecStatus?.is_vectorized === "processing"
+                ? "Vectorizing..."
+                : "Vectorize"}
+            </button>
+          )}
+          {isVecLoading && (
+            <span className="text-sm text-[var(--muted)]" style={{ marginRight: "auto" }}>
+              向量化中...
+            </span>
+          )}
           {mode === "view" && isProcessed && (
             <button className="modal-edit-btn" onClick={() => setMode("edit")}>
               编辑
