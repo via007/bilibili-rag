@@ -312,6 +312,64 @@ export const chatApi = {
         ),
 };
 
+// ==================== 分P向量化相关 ====================
+
+export interface VectorPageStatusResponse {
+  exists: boolean;
+  bvid?: string;
+  cid?: number;
+  page_index?: number;
+  page_title?: string;
+  is_processed: boolean;
+  content_preview?: string;
+  is_vectorized: "pending" | "processing" | "done" | "failed";
+  vectorized_at?: string;
+  vector_chunk_count: number;
+  vector_error?: string;
+  chroma_exists: boolean;
+}
+
+export interface VectorPageTaskStatus {
+  task_id: string;
+  status: "pending" | "processing" | "done" | "failed";
+  progress: number;
+  message: string;
+  result?: { chunk_count?: number };
+  error?: string;
+}
+
+export const vecPageApi = {
+  // 查询向量状态
+  getStatus: (bvid: string, cid: number) =>
+    request<VectorPageStatusResponse>(
+      `/vec/page/status?bvid=${bvid}&cid=${cid}`
+    ),
+
+  // 发起向量化（幂等）
+  create: (params: { bvid: string; cid: number; page_index: number; page_title?: string }) =>
+    request<{ task_id: string | null; message: string }>(
+      "/vec/page/create",
+      {
+        method: "POST",
+        body: JSON.stringify(params),
+      }
+    ),
+
+  // 强制重新向量化
+  revector: (params: { bvid: string; cid: number }) =>
+    request<{ task_id: string; message: string }>(
+      "/vec/page/revector",
+      {
+        method: "POST",
+        body: JSON.stringify(params),
+      }
+    ),
+
+  // 轮询任务状态
+  getTaskStatus: (taskId: string) =>
+    request<VectorPageTaskStatus>(`/vec/page/status/${taskId}`),
+};
+
 // ==================== ASR 分P相关 ====================
 
 export interface ASRContentResponse {
@@ -358,7 +416,7 @@ export const asrApi = {
         ),
 
     // 手动编辑更新
-    update: (params: { bvid: string; cid: number; content: string }) =>
+    update: (params: { bvid: string; cid: number; page_index: number; content: string }) =>
         request<{ success: boolean; message: string }>(
             "/asr/update",
             {
@@ -368,7 +426,7 @@ export const asrApi = {
         ),
 
     // 强制重新 ASR
-    reasr: (params: { bvid: string; cid: number }) =>
+    reasr: (params: { bvid: string; cid: number; page_index: number }) =>
         request<{ task_id: string; message: string }>(
             "/asr/reasr",
             {
