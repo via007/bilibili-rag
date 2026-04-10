@@ -7,6 +7,8 @@ import {
   VideoPageInfo,
   favoritesApi,
   knowledgeApi,
+  vecPageApi,
+  VectorPageStatusResponse,
   BuildStatus,
   FolderStatus,
   OrganizePreviewResponse,
@@ -17,10 +19,22 @@ interface Props {
   sessionId: string;
   onBuildDone?: () => void;
   onSelectionChange?: (folderIds: number[]) => void;
-  onOpenASR?: (bvid: string, cid: number, pageTitle: string) => void;
+  onOpenASR?: (bvid: string, cid: number, pageTitle: string, pageIndex?: number) => void;
+  externalVectorUpdate?: {
+    bvid: string;
+    cid: number;
+    status: VectorPageStatusResponse;
+    version: number;
+  } | null;
 }
 
-export default function SourcesPanel({ sessionId, onBuildDone, onSelectionChange, onOpenASR }: Props) {
+export default function SourcesPanel({
+  sessionId,
+  onBuildDone,
+  onSelectionChange,
+  onOpenASR,
+  externalVectorUpdate,
+}: Props) {
   const [folders, setFolders] = useState<(FavoriteFolder & { videos?: Video[]; expanded?: boolean; loading?: boolean; count_source?: "bili" | "filtered" | "db" })[]>([]);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [loading, setLoading] = useState(true);
@@ -38,6 +52,12 @@ export default function SourcesPanel({ sessionId, onBuildDone, onSelectionChange
 
   // 分P数据缓存（key: bvid）
   const [pageCache, setPageCache] = useState<Record<string, VideoPageInfo[]>>({});
+
+  // 分P向量化状态缓存（key: `${bvid}-${cid}`）
+  const [pageVectorStatus, setPageVectorStatus] = useState<Record<string, VectorPageStatusResponse>>({});
+
+  // 向量化操作提示
+  const [vectorMessage, setVectorMessage] = useState<string | null>(null);
 
   // 加载收藏夹列表（从B站获取）
   const loadFolders = async () => {
@@ -77,6 +97,15 @@ export default function SourcesPanel({ sessionId, onBuildDone, onSelectionChange
     loadFolders().then(loadStatuses);
   }, [sessionId]);
 
+  useEffect(() => {
+    if (!externalVectorUpdate) return;
+    const { bvid, cid, status } = externalVectorUpdate;
+    setPageVectorStatus((prev) => ({
+      ...prev,
+      [`${bvid}-${cid}`]: status,
+    }));
+  }, [externalVectorUpdate]);
+
   // 刷新
   const refresh = async () => {
     setMessage(null);
@@ -85,8 +114,21 @@ export default function SourcesPanel({ sessionId, onBuildDone, onSelectionChange
   };
 
   // 打开 ASR 弹窗
-  const handleASRClick = (bvid: string, cid: number, pageTitle: string) => {
-    onOpenASR?.(bvid, cid, pageTitle || `P${cid}`);
+  const handleASRClick = (bvid: string, cid: number, pageTitle: string, pageIndex: number = 0) => {
+    onOpenASR?.(bvid, cid, pageTitle || `P${cid}`, pageIndex);
+  };
+
+  const updatePageStatusCache = (bvid: string, cid: number, status: VectorPageStatusResponse) => {
+    setPageVectorStatus((prev) => ({
+      ...prev,
+      [`${bvid}-${cid}`]: status,
+    }));
+  };
+
+  const refreshPageVectorStatus = async (bvid: string, cid: number) => {
+    const refreshed = await vecPageApi.getStatus(bvid, cid);
+    updatePageStatusCache(bvid, cid, refreshed);
+    return refreshed;
   };
 
   // 处理视频项点击（展开分P列表 + 按需获取分P数据）
@@ -105,6 +147,20 @@ export default function SourcesPanel({ sessionId, onBuildDone, onSelectionChange
       try {
         const data = await knowledgeApi.getVideoPages(bvid);
         setPageCache((prev) => ({ ...prev, [bvid]: data.pages }));
+
+        // 3. 同步批量查询每P向量状态
+        const vecStatusMap: Record<string, VectorPageStatusResponse> = {};
+        await Promise.all(
+          data.pages.map(async (p) => {
+            try {
+              const status = await vecPageApi.getStatus(bvid, p.cid);
+              vecStatusMap[`${bvid}-${p.cid}`] = status;
+            } catch {
+              // ignore
+            }
+          })
+        );
+        setPageVectorStatus((prev) => ({ ...prev, ...vecStatusMap }));
       } catch (e) {
         console.error("[SourcesPanel] 获取分P失败:", e);
       }
@@ -250,7 +306,135 @@ export default function SourcesPanel({ sessionId, onBuildDone, onSelectionChange
     return { label: "已入库", className: "ok", indexedCount, totalCount };
   };
 
+  // 向量化状态 Icon
+  function VecStatusIcon({ status }: { status: string }) {
+    const config = {
+      pending: { icon: "○", color: "text-gray-400", label: "未向量化" },
+      processing: { icon: "◐", color: "text-yellow-500", label: "向量化中" },
+      done: { icon: "●", color: "text-green-500", label: "已向量化" },
+      failed: { icon: "✕", color: "text-red-500", label: "向量化失败" },
+    };
+    const c = config[status as keyof typeof config] || config.pending;
+    return <span className={c.color} title={c.label}>{c.icon}</span>;
+  }
+
+  // 向量化按钮 handler
+  const handleVectorClick = async (bvid: string, cid: number, pageTitle: string) => {
+    const pages = pageCache[bvid];
+    const pageInfo = pages?.find((p) => p.cid === cid);
+    const pageIndex = pageInfo ? pageInfo.page - 1 : 0;
+
+    setVectorMessage(null);
+    try {
+      const resp = await vecPageApi.create({ bvid, cid, page_index: pageIndex, page_title: pageTitle });
+      if (!resp.task_id) {
+        setVectorMessage("已是最新向量");
+        return;
+      }
+
+      // 轮询直到完成
+      for (let i = 0; i < 60; i++) {
+        await new Promise((r) => setTimeout(r, 1000));
+        const taskStatus = await vecPageApi.getTaskStatus(resp.task_id);
+        if (taskStatus.status === "done") {
+          setVectorMessage("向量化完成");
+          // 刷新状态
+          const refreshed = await vecPageApi.getStatus(bvid, cid);
+          setPageVectorStatus((prev) => ({
+            ...prev,
+            [`${bvid}-${cid}`]: refreshed,
+          }));
+          return;
+        }
+        if (taskStatus.status === "failed") {
+          setVectorMessage(`向量化失败: ${taskStatus.message}`);
+          return;
+        }
+      }
+      setVectorMessage("向量化超时");
+    } catch {
+      setVectorMessage("向量化请求失败");
+    }
+  };
+
   // 计算按钮文字
+  const handleVectorClickV2 = async (bvid: string, cid: number, pageTitle: string) => {
+    const pages = pageCache[bvid];
+    const pageInfo = pages?.find((p) => p.cid === cid);
+    const pageIndex = pageInfo ? pageInfo.page - 1 : 0;
+    const cacheKey = `${bvid}-${cid}`;
+    const prevStatus = pageVectorStatus[cacheKey];
+
+    setVectorMessage(null);
+    try {
+      const resp = await vecPageApi.create({ bvid, cid, page_index: pageIndex, page_title: pageTitle });
+      if (!resp.task_id) {
+        const refreshed = await refreshPageVectorStatus(bvid, cid);
+        setVectorMessage(
+          refreshed.is_vectorized === "done"
+            ? `已是最新向量 (${refreshed.vector_chunk_count} 块)`
+            : "无需重复向量化"
+        );
+        return;
+      }
+
+      updatePageStatusCache(bvid, cid, {
+        exists: prevStatus?.exists ?? true,
+        bvid,
+        cid,
+        page_index: prevStatus?.page_index ?? pageIndex,
+        page_title: prevStatus?.page_title ?? pageTitle,
+        is_processed: prevStatus?.is_processed ?? true,
+        content_preview: prevStatus?.content_preview,
+        is_vectorized: "processing",
+        vectorized_at: prevStatus?.vectorized_at,
+        vector_chunk_count: prevStatus?.vector_chunk_count ?? 0,
+        vector_error: undefined,
+        chroma_exists: prevStatus?.chroma_exists ?? false,
+      });
+      setVectorMessage("向量化任务已提交");
+
+      for (let i = 0; i < 60; i++) {
+        await new Promise((r) => setTimeout(r, 1000));
+        const taskStatus = await vecPageApi.getTaskStatus(resp.task_id);
+        if (taskStatus.status === "done") {
+          const refreshed = await refreshPageVectorStatus(bvid, cid);
+          setVectorMessage(`向量化完成 (${refreshed.vector_chunk_count} 块)`);
+          return;
+        }
+        if (taskStatus.status === "failed") {
+          try {
+            await refreshPageVectorStatus(bvid, cid);
+          } catch {
+            // ignore secondary refresh errors
+          }
+          setVectorMessage(`向量化失败: ${taskStatus.message}`);
+          return;
+        }
+      }
+
+      try {
+        const refreshed = await refreshPageVectorStatus(bvid, cid);
+        if (refreshed.is_vectorized === "done") {
+          setVectorMessage(`向量化已完成 (${refreshed.vector_chunk_count} 块)，状态已刷新`);
+        } else if (refreshed.is_vectorized === "processing") {
+          setVectorMessage("向量化仍在后台处理中，请稍后刷新查看");
+        } else {
+          setVectorMessage("向量化超时，已回刷当前状态");
+        }
+      } catch {
+        setVectorMessage("向量化超时，状态刷新失败");
+      }
+    } catch {
+      try {
+        await refreshPageVectorStatus(bvid, cid);
+      } catch {
+        // ignore secondary refresh errors
+      }
+      setVectorMessage("向量化请求失败");
+    }
+  };
+
   const getButtonText = () => {
     if (building) return progress?.current_step || "处理中...";
     if (selected.size === 0) return "选择收藏夹";
@@ -359,39 +543,53 @@ export default function SourcesPanel({ sessionId, onBuildDone, onSelectionChange
                                 </div>
                                 {isVideoExpanded && pages && (
                                   <div className="pl-4 mt-1 space-y-1 overflow-hidden">
-                                    {pages.map((p) => (
-                                      <div
-                                        key={`${v.bvid}-${p.page}`}
-                                        className="text-xs flex items-center gap-1 cursor-pointer hover:text-[var(--accent)] min-w-0"
-                                      >
-                                        <span
-                                          className="text-[var(--accent)]"
+                                    {pages.map((p) => {
+                                      const vecStatus = pageVectorStatus[`${v.bvid}-${p.cid}`];
+                                      return (
+                                        <div
+                                          key={`${v.bvid}-${p.page}`}
+                                          className="text-xs flex items-center gap-1 cursor-pointer hover:text-[var(--accent)] min-w-0"
                                           onClick={() => window.open(`https://www.bilibili.com/video/${v.bvid}?p=${p.page}`)}
                                         >
-                                          ▶
-                                        </span>
-                                        <span
-                                          onClick={() => window.open(`https://www.bilibili.com/video/${v.bvid}?p=${p.page}`)}
-                                        >
-                                          P{p.page}:
-                                        </span>
-                                        <span
-                                          className="truncate flex-1"
-                                          onClick={() => window.open(`https://www.bilibili.com/video/${v.bvid}?p=${p.page}`)}
-                                        >
-                                          {p.title}
-                                        </span>
-                                        <button
-                                          onClick={(e) => {
-                                            e.stopPropagation();
-                                            handleASRClick(v.bvid, p.cid, `P${p.page}: ${p.title}`);
-                                          }}
-                                          className="ml-2 text-[var(--accent)] hover:underline text-xs whitespace-nowrap"
-                                        >
-                                          转文字
-                                        </button>
-                                      </div>
-                                    ))}
+                                          <span className="text-[var(--accent)]">▶</span>
+                                          <span>P{p.page}:</span>
+                                          <span className="truncate flex-1">{p.title}</span>
+
+                                          {/* 向量化状态 icon */}
+                                          <VecStatusIcon status={vecStatus?.is_vectorized || "pending"} />
+
+                                          {/* ASR 按钮 */}
+                                          <button
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              handleASRClick(v.bvid, p.cid, `P${p.page}: ${p.title}`, p.page - 1);
+                                            }}
+                                            className="ml-1 text-[var(--accent)] hover:underline text-xs whitespace-nowrap"
+                                          >
+                                            转文字
+                                          </button>
+
+                                          {/* 向量化按钮 */}
+                                          <button
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              handleVectorClickV2(v.bvid, p.cid, `P${p.page}: ${p.title}`);
+                                            }}
+                                            disabled={vecStatus?.is_vectorized === "processing"}
+                                            title={!vecStatus?.is_processed ? "Auto ASR before vectorization" : ""}
+                                            className="ml-1 text-xs whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed hover:underline"
+                                          >
+                                            {vecStatus?.is_vectorized === "processing"
+                                              ? "向量化中..."
+                                              : !vecStatus?.is_processed
+                                              ? "ASR+Vector"
+                                              : vecStatus?.is_vectorized === "done"
+                                              ? "重新向量化"
+                                              : "向量化"}
+                                          </button>
+                                        </div>
+                                      );
+                                    })}
                                   </div>
                                 )}
                               </div>
@@ -425,6 +623,7 @@ export default function SourcesPanel({ sessionId, onBuildDone, onSelectionChange
         {/* 消息 */}
         {message && <div className="text-xs text-[var(--muted)] mb-3">{message}</div>}
         {organizeMessage && <div className="text-xs text-[var(--muted)] mb-3">{organizeMessage}</div>}
+        {vectorMessage && <div className="text-xs text-[var(--muted)] mb-3">{vectorMessage}</div>}
 
         {/* 主按钮 */}
         <button
