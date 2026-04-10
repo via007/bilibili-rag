@@ -202,6 +202,25 @@ class RAGService:
             raise
         
         return len(documents)
+
+    def _get_page_vector_ids(self, bvid: str, page_index: int) -> List[str]:
+        """
+        先按 bvid 获取全部 chunk，再在 Python 侧过滤 page_index，
+        避免 Chroma 多条件 where 在不同版本下的兼容性问题。
+        """
+        result = self.vectorstore._collection.get(
+            where={"bvid": bvid},
+            include=["metadatas"]
+        )
+        ids = result.get("ids", [])
+        metadatas = result.get("metadatas", [])
+        matched_ids: List[str] = []
+
+        for doc_id, metadata in zip(ids, metadatas):
+            if metadata and metadata.get("page_index") == page_index:
+                matched_ids.append(doc_id)
+
+        return matched_ids
     
     def add_videos_batch(self, videos: List[VideoContent], progress_callback=None) -> dict:
         """
@@ -474,9 +493,9 @@ class RAGService:
             page_index: 分P序号（0-based）
         """
         try:
-            self.vectorstore._collection.delete(where={
-                "$and": [{"bvid": bvid}, {"page_index": page_index}],
-            })
+            ids = self._get_page_vector_ids(bvid, page_index)
+            if ids:
+                self.vectorstore._collection.delete(ids=ids)
             logger.info(f"已删除分P向量: {bvid} P{page_index + 1}")
         except Exception as e:
             logger.error(f"删除分P向量失败 [{bvid} P{page_index + 1}]: {e}")
@@ -494,12 +513,7 @@ class RAGService:
             向量块数量
         """
         try:
-            result = self.vectorstore._collection.get(
-                where={"$and": [{"bvid": bvid}, {"page_index": page_index}]},
-                include=[]
-            )
-            count = len(result.get("ids", []))
-            return count
+            return len(self._get_page_vector_ids(bvid, page_index))
         except Exception as e:
             logger.warning(f"获取分P向量数量失败 [{bvid} P{page_index + 1}]: {e}")
             return 0
