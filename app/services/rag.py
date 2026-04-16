@@ -256,19 +256,66 @@ class RAGService:
             "chunks": total_chunks
         }
     
-    def search(self, query: str, k: int = 5, bvids: Optional[List[str]] = None) -> List[Document]:
+    def search(
+        self,
+        query: str,
+        k: int = 5,
+        bvids: Optional[List[str]] = None,
+        workspace_pages: Optional[List[dict]] = None,
+    ) -> List[Document]:
         """
         检索相关内容
+
+        Args:
+            query: 查询文本
+            k: 召回数量
+            bvids: 可选，限制在这些视频范围内搜索
+            workspace_pages: 可选，工作区选中的分P列表，用于精确过滤。
+                             格式: [{"bvid": "BVxxx", "cid": 123, "page_index": 0}, ...]
         """
         if not query or not query.strip():
             logger.warning("检索查询为空")
             return []
-            
+
         try:
-            if bvids:
-                docs = self.vectorstore.similarity_search(query, k=k, filter={"bvid": {"$in": bvids}})
+            # 构建过滤条件
+            filter_cond = None
+            if workspace_pages:
+                # 工作区模式：精确匹配 bvid + page_index
+                conditions = []
+                for wp in workspace_pages:
+                    bvid_val = wp.get("bvid")
+                    page_idx = wp.get("page_index", 0)
+                    # 诊断：检查是否有异常类型
+                    if not isinstance(bvid_val, str):
+                        logger.warning(f"[RAG_SEARCH_DEBUG] workspace_pages 中 bvid 类型异常: type={type(bvid_val)}, value={repr(bvid_val)[:50]}")
+                    if not isinstance(page_idx, int):
+                        logger.warning(f"[RAG_SEARCH_DEBUG] workspace_pages 中 page_index 类型异常: type={type(page_idx)}, value={repr(page_idx)[:50]}")
+                    conditions.append({
+                        "bvid": bvid_val,
+                        "page_index": page_idx
+                    })
+                if conditions:
+                    # Chroma 的 $or 需要用 where_document 配合
+                    # 这里用简化的方式：先用 bvids 过滤，再在结果中过滤 page_index
+                    try:
+                        wp_bvids = list(set(wp.get("bvid") for wp in workspace_pages))
+                    except TypeError as te:
+                        logger.warning(f"[RAG_SEARCH_DEBUG] wp_bvids set 构建失败: {te}")
+                        raise
+                    filter_cond = {"bvid": {"$in": wp_bvids}}
+            elif bvids:
+                filter_cond = {"bvid": {"$in": bvids}}
+
+            if filter_cond:
+                docs = self.vectorstore.similarity_search(query, k=k, filter=filter_cond)
             else:
                 docs = self.vectorstore.similarity_search(query, k=k)
+
+            # 工作区模式：进一步按 page_index 精确过滤
+            if workspace_pages:
+                wp_set = {(wp.get("bvid"), wp.get("page_index", 0)) for wp in workspace_pages}
+                docs = [d for d in docs if (d.metadata.get("bvid"), d.metadata.get("page_index", 0)) in wp_set]
 
             logger.info(f"检索完成：query='{query}'，召回={len(docs)}")
             for idx, doc in enumerate(docs):
