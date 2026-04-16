@@ -174,6 +174,22 @@ export interface ChatResponse {
     }>;
 }
 
+// 工作区页面（用户选中的已向量化分P）
+export interface WorkspacePage {
+    bvid: string;
+    cid: number;
+    page_index: number;
+    page_title?: string;
+}
+
+// 对话请求载荷（统一构造方式）
+export interface ChatRequestPayload {
+    question: string;
+    session_id?: string;
+    folder_ids?: number[];
+    workspace_pages?: WorkspacePage[];
+}
+
 // ==================== API 函数 ====================
 
 // 认证相关
@@ -298,10 +314,10 @@ export const knowledgeApi = {
 // 对话相关
 export const chatApi = {
     // 提问
-    ask: (question: string, sessionId?: string, folderIds?: number[]) =>
+    ask: (payload: ChatRequestPayload) =>
         request<ChatResponse>("/chat/ask", {
             method: "POST",
-            body: JSON.stringify({ question, session_id: sessionId, folder_ids: folderIds }),
+            body: JSON.stringify(payload),
         }),
 
     // 搜索
