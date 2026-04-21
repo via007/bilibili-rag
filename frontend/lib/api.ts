@@ -174,6 +174,34 @@ export interface ChatResponse {
     }>;
 }
 
+export interface ReasoningStep {
+    step: number;
+    action: string;
+    query: string;
+    reasoning: string;
+    verdict?: string | null;
+    recall_score?: number | null;
+    sources: Array<{
+        bvid: string;
+        title: string;
+        url: string;
+    }>;
+    content_preview: string;
+}
+
+export interface AgenticChatResponse {
+    answer: string;
+    sources: Array<{
+        bvid: string;
+        title: string;
+        url: string;
+    }>;
+    reasoning_steps: ReasoningStep[];
+    synthesis_method: string;
+    hops_used: number;
+    avg_recall_score: number;
+}
+
 // 工作区页面（用户选中的已向量化分P）
 export interface WorkspacePage {
     bvid: string;
@@ -313,9 +341,16 @@ export const knowledgeApi = {
 
 // 对话相关
 export const chatApi = {
-    // 提问
+    // 提问（标准模式）
     ask: (payload: ChatRequestPayload) =>
         request<ChatResponse>("/chat/ask", {
+            method: "POST",
+            body: JSON.stringify(payload),
+        }),
+
+    // 提问（Agentic RAG 模式）
+    askAgentic: (payload: ChatRequestPayload) =>
+        request<AgenticChatResponse>("/chat/ask/agentic", {
             method: "POST",
             body: JSON.stringify(payload),
         }),
