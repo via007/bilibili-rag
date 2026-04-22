@@ -598,55 +598,57 @@ export default function SourcesPanel({
                                       return (
                                         <div
                                           key={`${v.bvid}-${p.page}`}
-                                          className="text-xs flex items-center gap-1 cursor-pointer hover:text-[var(--accent)] min-w-0"
+                                          className="page-row"
                                           onClick={() => window.open(`https://www.bilibili.com/video/${v.bvid}?p=${p.page}`)}
                                         >
                                           <span className="text-[var(--accent)]">▶</span>
                                           <span>P{p.page}:</span>
                                           <span className="truncate flex-1">{p.title}</span>
 
-                                          {/* 工作区勾选 */}
-                                          <input
-                                            type="checkbox"
-                                            checked={isInWorkspace(v.bvid, p.cid)}
-                                            onChange={() => toggleWorkspacePage(v.bvid, p.cid, `P${p.page}: ${p.title}`, p.page - 1)}
-                                            onClick={(e) => e.stopPropagation()}
-                                            className="w-3 h-3 accent-[var(--accent)]"
-                                            title="加入工作区"
-                                          />
+                                          <div className="page-actions">
+                                            {/* 工作区勾选 */}
+                                            <input
+                                              type="checkbox"
+                                              checked={isInWorkspace(v.bvid, p.cid)}
+                                              onChange={() => toggleWorkspacePage(v.bvid, p.cid, `P${p.page}: ${p.title}`, p.page - 1)}
+                                              onClick={(e) => e.stopPropagation()}
+                                              className="w-3 h-3 accent-[var(--accent)]"
+                                              title="加入工作区"
+                                            />
 
-                                          {/* 向量化状态 icon */}
-                                          <VecStatusIcon status={vecStatus?.is_vectorized || "pending"} />
+                                            {/* 向量化状态 icon */}
+                                            <VecStatusIcon status={vecStatus?.is_vectorized || "pending"} />
 
-                                          {/* ASR 按钮 */}
-                                          <button
-                                            onClick={(e) => {
-                                              e.stopPropagation();
-                                              handleASRClick(v.bvid, p.cid, `P${p.page}: ${p.title}`, p.page - 1);
-                                            }}
-                                            className="ml-1 text-[var(--accent)] hover:underline text-xs whitespace-nowrap"
-                                          >
-                                            转文字
-                                          </button>
+                                            {/* ASR 按钮 */}
+                                            <button
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                handleASRClick(v.bvid, p.cid, `P${p.page}: ${p.title}`, p.page - 1);
+                                              }}
+                                              className="page-action-btn"
+                                            >
+                                              转文字
+                                            </button>
 
-                                          {/* 向量化按钮 */}
-                                          <button
-                                            onClick={(e) => {
-                                              e.stopPropagation();
-                                              handleVectorClickV2(v.bvid, p.cid, `P${p.page}: ${p.title}`);
-                                            }}
-                                            disabled={vecStatus?.is_vectorized === "processing"}
-                                            title={!vecStatus?.is_processed ? "Auto ASR before vectorization" : ""}
-                                            className="ml-1 text-xs whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed hover:underline"
-                                          >
-                                            {vecStatus?.is_vectorized === "processing"
-                                              ? "向量化中..."
-                                              : !vecStatus?.is_processed
-                                              ? "ASR+Vector"
-                                              : vecStatus?.is_vectorized === "done"
-                                              ? "重新向量化"
-                                              : "向量化"}
-                                          </button>
+                                            {/* 向量化按钮 */}
+                                            <button
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                handleVectorClickV2(v.bvid, p.cid, `P${p.page}: ${p.title}`);
+                                              }}
+                                              disabled={vecStatus?.is_vectorized === "processing"}
+                                              title={!vecStatus?.is_processed ? "Auto ASR before vectorization" : ""}
+                                              className="page-action-btn"
+                                            >
+                                              {vecStatus?.is_vectorized === "processing"
+                                                ? "向量化中..."
+                                                : !vecStatus?.is_processed
+                                                ? "ASR+Vector"
+                                                : vecStatus?.is_vectorized === "done"
+                                                ? "重新向量化"
+                                                : "向量化"}
+                                            </button>
+                                          </div>
                                         </div>
                                       );
                                     })}

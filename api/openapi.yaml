@@ -22,7 +22,7 @@ info:
     聊天接口 `/chat/ask/stream` 使用 Server-Sent Events 流式返回：
     - 格式: `data: {chunk_text}`
     - 结束后发送: `data: [[SOURCES_JSON]]{sources_json}`
-  version: 1.0.0
+  version: 1.2.0
   contact:
     name: Bilibili RAG Project
   license:
@@ -41,6 +41,10 @@ tags:
     description: 收藏夹浏览与整理
   - name: 知识库
     description: 知识库构建与管理
+  - name: ASR
+    description: 分P视频语音转文本
+  - name: 分P向量化
+    description: 分P视频向量化入库
 
 paths:
   # ========== 认证路由 ==========
@@ -929,6 +933,431 @@ paths:
               example:
                 message: "已删除视频 BV1xx411c7mD"
 
+  # ========== ASR 分P转写 ==========
+  /asr/content:
+    get:
+      tags:
+        - ASR
+      summary: 查询 ASR 内容
+      description: |
+        查询指定分P的 ASR 转写内容。
+
+        - 不存在返回 `{exists: false}`
+        - 存在返回内容详情
+      operationId: getASRContent
+      parameters:
+        - name: bvid
+          in: query
+          required: true
+          description: 视频BV号
+          schema:
+            type: string
+        - name: cid
+          in: query
+          required: true
+          description: 分P的CID
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: ASR内容
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ASRContentResponse'
+              example:
+                exists: true
+                bvid: "BV1xx411c7mD"
+                cid: 12345678
+                page_index: 0
+                page_title: "P1: 课程介绍"
+                content: "欢迎来到本课程..."
+                content_source: "asr"
+                version: 1
+                is_processed: true
+
+  /asr/create:
+    post:
+      tags:
+        - ASR
+      summary: 创建 ASR 任务
+      description: |
+        幂等创建 ASR 转写任务。
+
+        - 已存在且 `is_processed=true` → 直接返回
+        - 不存在 → 创建记录并启动后台任务
+      operationId: createASR
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ASRCreateRequest'
+            example:
+              bvid: "BV1xx411c7mD"
+              cid: 12345678
+              page_index: 0
+              page_title: "P1: 课程介绍"
+      responses:
+        '200':
+          description: 任务创建结果
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  task_id:
+                    type: string
+                    nullable: true
+                  message:
+                    type: string
+                  version:
+                    type: integer
+              example:
+                task_id: "550e8400-e29b-41d4-a716-446655440000"
+                message: "ASR 任务已创建"
+        '409':
+          description: ASR 已完成，无需重复创建
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  task_id:
+                    type: string
+                    nullable: true
+                  message:
+                    type: string
+
+  /asr/update:
+    post:
+      tags:
+        - ASR
+      summary: 更新 ASR 内容
+      description: |
+        手动编辑并覆盖 ASR 转写内容。不新建版本，直接覆盖当前内容。
+      operationId: updateASR
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ASRUpdateRequest'
+            example:
+              bvid: "BV1xx411c7mD"
+              cid: 12345678
+              page_index: 0
+              content: "手动编辑后的内容..."
+      responses:
+        '200':
+          description: 更新成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  message:
+                    type: string
+              example:
+                success: true
+                message: "更新成功"
+        '404':
+          description: ASR 记录不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /asr/reasr:
+    post:
+      tags:
+        - ASR
+      summary: 重新 ASR
+      description: |
+        强制重新执行 ASR 转写。
+
+        - 将当前内容保存到版本历史
+        - 清空当前内容，启动新的 ASR 任务
+      operationId: reASR
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ASRReASRRequest'
+            example:
+              bvid: "BV1xx411c7mD"
+              cid: 12345678
+              page_index: 0
+      responses:
+        '200':
+          description: 重新 ASR 已启动
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  task_id:
+                    type: string
+                  message:
+                    type: string
+              example:
+                task_id: "550e8400-e29b-41d4-a716-446655440000"
+                message: "重新 ASR 已启动"
+        '404':
+          description: ASR 记录不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /asr/status/{task_id}:
+    get:
+      tags:
+        - ASR
+      summary: 查询 ASR 任务状态
+      description: 轮询 ASR 后台任务的执行状态。
+      operationId: getASRTaskStatus
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          description: 任务ID
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 任务状态
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ASRTaskStatus'
+              example:
+                task_id: "550e8400-e29b-41d4-a716-446655440000"
+                status: "processing"
+                progress: 65
+                message: "转写中..."
+        '404':
+          description: 任务不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /asr/versions:
+    get:
+      tags:
+        - ASR
+      summary: 查询 ASR 版本历史
+      description: 获取指定分P的 ASR 版本历史列表。
+      operationId: getASRVersions
+      parameters:
+        - name: bvid
+          in: query
+          required: true
+          description: 视频BV号
+          schema:
+            type: string
+        - name: cid
+          in: query
+          required: true
+          description: 分P的CID
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: 版本历史列表
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/VideoPageVersionInfo'
+              example:
+                - version: 1
+                  content_source: "asr"
+                  content_preview: "欢迎来到本课程..."
+                  is_latest: false
+                  created_at: "2026-04-01T10:00:00"
+                - version: 2
+                  content_source: "asr"
+                  content_preview: "欢迎来到本课程（修正版）..."
+                  is_latest: true
+                  created_at: "2026-04-02T10:00:00"
+
+  # ========== 分P向量化 ==========
+  /vec/page/status:
+    get:
+      tags:
+        - 分P向量化
+      summary: 查询分P向量状态
+      description: |
+        查询指定分P的向量化状态，包含 ChromaDB 实际向量数量校验。
+
+        会自动修复不一致状态：
+        - DB 标记 done 但 ChromaDB 为空 → 降级为 failed
+        - DB 标记 pending 但 ChromaDB 有数据 → 升级为 done
+      operationId: getVectorPageStatus
+      parameters:
+        - name: bvid
+          in: query
+          required: true
+          description: 视频BV号
+          schema:
+            type: string
+        - name: cid
+          in: query
+          required: true
+          description: 分P的CID
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: 向量状态
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VectorPageStatusResponse'
+              example:
+                exists: true
+                bvid: "BV1xx411c7mD"
+                cid: 12345678
+                page_index: 0
+                page_title: "P1: 课程介绍"
+                is_processed: true
+                is_vectorized: "done"
+                vector_chunk_count: 15
+                chroma_exists: true
+
+  /vec/page/create:
+    post:
+      tags:
+        - 分P向量化
+      summary: 创建向量化任务
+      description: |
+        幂等创建分P向量化任务。
+
+        - 若 ASR 未完成，会先等待 ASR 完成再执行向量化
+        - 已是最新向量则直接跳过
+      operationId: createVectorPage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VectorPageCreateRequest'
+            example:
+              bvid: "BV1xx411c7mD"
+              cid: 12345678
+              page_index: 0
+              page_title: "P1: 课程介绍"
+      responses:
+        '200':
+          description: 任务创建结果
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  task_id:
+                    type: string
+                    nullable: true
+                  message:
+                    type: string
+              example:
+                task_id: "550e8400-e29b-41d4-a716-446655440000"
+                message: "向量化任务已创建"
+
+  /vec/page/revector:
+    post:
+      tags:
+        - 分P向量化
+      summary: 重新向量化
+      description: |
+        强制重建分P向量：删除旧向量，重新执行向量化。
+
+        要求 ASR 已完成（有内容）。
+      operationId: reVectorPage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VectorPageReVectorRequest'
+            example:
+              bvid: "BV1xx411c7mD"
+              cid: 12345678
+      responses:
+        '200':
+          description: 重建任务已创建
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  task_id:
+                    type: string
+                  message:
+                    type: string
+              example:
+                task_id: "550e8400-e29b-41d4-a716-446655440000"
+                message: "重建任务已创建"
+        '400':
+          description: ASR 未完成
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: VideoPage 不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /vec/page/status/{task_id}:
+    get:
+      tags:
+        - 分P向量化
+      summary: 查询向量化任务状态
+      description: |
+        轮询向量化后台任务的执行状态，含 steps 子步骤透传。
+      operationId: getVectorPageTaskStatus
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          description: 任务ID
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 任务状态
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VectorPageTaskStatus'
+              example:
+                task_id: "550e8400-e29b-41d4-a716-446655440000"
+                status: "processing"
+                progress: 65
+                message: "处理中..."
+                steps:
+                  - name: "chunk"
+                    status: "done"
+                    progress: 100
+                  - name: "embedding"
+                    status: "processing"
+                    progress: 60
+        '404':
+          description: 任务不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
 components:
   schemas:
     # ========== 认证相关 ==========
@@ -1302,6 +1731,248 @@ components:
           type: integer
         message:
           type: string
+
+    # ========== ASR 分P ==========
+    ASRCreateRequest:
+      type: object
+      required:
+        - bvid
+        - cid
+      properties:
+        bvid:
+          type: string
+          description: 视频BV号
+        cid:
+          type: integer
+          description: 分P的CID
+        page_index:
+          type: integer
+          description: P序号（0-based）
+          default: 0
+        page_title:
+          type: string
+          description: 分P标题
+          nullable: true
+
+    ASRUpdateRequest:
+      type: object
+      required:
+        - bvid
+        - cid
+        - page_index
+        - content
+      properties:
+        bvid:
+          type: string
+        cid:
+          type: integer
+        page_index:
+          type: integer
+        content:
+          type: string
+          description: 手动编辑的ASR内容
+
+    ASRReASRRequest:
+      type: object
+      required:
+        - bvid
+        - cid
+        - page_index
+      properties:
+        bvid:
+          type: string
+        cid:
+          type: integer
+        page_index:
+          type: integer
+
+    ASRContentResponse:
+      type: object
+      required:
+        - exists
+      properties:
+        exists:
+          type: boolean
+          description: 是否存在ASR记录
+        bvid:
+          type: string
+          nullable: true
+        cid:
+          type: integer
+          nullable: true
+        page_index:
+          type: integer
+          nullable: true
+        page_title:
+          type: string
+          nullable: true
+        content:
+          type: string
+          description: ASR转写全文
+          nullable: true
+        content_source:
+          type: string
+          description: 内容来源（asr / user_edit）
+          nullable: true
+        version:
+          type: integer
+          nullable: true
+        is_processed:
+          type: boolean
+          nullable: true
+
+    ASRTaskStatus:
+      type: object
+      required:
+        - task_id
+        - status
+        - progress
+        - message
+      properties:
+        task_id:
+          type: string
+        status:
+          type: string
+          enum: [pending, processing, done, failed]
+        progress:
+          type: integer
+          minimum: 0
+          maximum: 100
+        message:
+          type: string
+
+    VideoPageVersionInfo:
+      type: object
+      required:
+        - version
+        - content_source
+        - content_preview
+        - is_latest
+      properties:
+        version:
+          type: integer
+        content_source:
+          type: string
+        content_preview:
+          type: string
+        is_latest:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+
+    # ========== 分P向量化 ==========
+    VectorPageStatusResponse:
+      type: object
+      required:
+        - exists
+        - is_processed
+        - is_vectorized
+        - vector_chunk_count
+        - chroma_exists
+      properties:
+        exists:
+          type: boolean
+          description: 是否存在VideoPage记录
+        bvid:
+          type: string
+          nullable: true
+        cid:
+          type: integer
+          nullable: true
+        page_index:
+          type: integer
+          nullable: true
+        page_title:
+          type: string
+          nullable: true
+        is_processed:
+          type: boolean
+          description: ASR是否完成
+        content_preview:
+          type: string
+          description: 内容预览（前200字符）
+          nullable: true
+        is_vectorized:
+          type: string
+          enum: [pending, processing, done, failed]
+          description: 向量化状态
+        vectorized_at:
+          type: string
+          format: date-time
+          nullable: true
+        vector_chunk_count:
+          type: integer
+          default: 0
+        vector_error:
+          type: string
+          nullable: true
+        chroma_exists:
+          type: boolean
+          description: ChromaDB中是否实际存在向量
+        steps:
+          type: array
+          items:
+            type: object
+          nullable: true
+          description: 子步骤状态
+
+    VectorPageTaskStatus:
+      type: object
+      required:
+        - task_id
+        - status
+        - progress
+        - message
+      properties:
+        task_id:
+          type: string
+        status:
+          type: string
+          enum: [pending, processing, done, failed]
+        progress:
+          type: integer
+        message:
+          type: string
+        steps:
+          type: array
+          items:
+            type: object
+          nullable: true
+        result:
+          type: object
+          nullable: true
+        error:
+          type: string
+          nullable: true
+
+    VectorPageCreateRequest:
+      type: object
+      required:
+        - bvid
+        - cid
+      properties:
+        bvid:
+          type: string
+        cid:
+          type: integer
+        page_index:
+          type: integer
+          default: 0
+        page_title:
+          type: string
+          nullable: true
+
+    VectorPageReVectorRequest:
+      type: object
+      required:
+        - bvid
+        - cid
+      properties:
+        bvid:
+          type: string
+        cid:
+          type: integer
 
     # ========== 通用 ==========
     ErrorResponse:
