@@ -12,7 +12,8 @@ from fastapi.responses import StreamingResponse
 from loguru import logger
 from sqlalchemy import select, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
-from openai import OpenAI
+from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_openai import ChatOpenAI
 from langchain_core.documents import Document
 
 from app.database import get_db
@@ -29,122 +30,85 @@ from app.config import settings
 from app.routers.knowledge import get_rag_service
 from app.services.query import RewriteResult, RewriteType, CONFIDENCE_THRESHOLD
 from app.services.rag import get_agentic_rag_service
+from app.services.rag.prompts import (
+    qa_system_prompt,
+    fallback_system_prompt,
+    direct_system_prompt,
+    db_list_system_prompt,
+    db_summary_system_prompt,
+    overview_system_prompt,
+)
 
 router = APIRouter(prefix="/chat", tags=["对话"])
 
-def _get_llm_client() -> OpenAI:
-    """获取 LLM 客户端"""
+def _get_llm() -> ChatOpenAI:
+    """获取 LangChain LLM 实例（支持 LangSmith 自动追踪）"""
     if not settings.openai_api_key:
         raise HTTPException(status_code=400, detail="未配置 LLM API Key")
-    return OpenAI(
+    return ChatOpenAI(
         api_key=settings.openai_api_key,
         base_url=settings.openai_base_url,
+        model=settings.llm_model,
+        temperature=0.5,
     )
 
-def _build_overview_messages(context: str, question: str) -> list[dict]:
-    system = (
-        "你是一个收藏夹知识库助手。用户想要了解他们收藏夹的整体内容。\n"
-        "请根据以下视频信息回答用户的问题。回答要：\n"
-        "1. 自然、友好、有条理\n"
-        "2. 可以总结、分类、提炼要点\n"
-        "3. 如果内容较多，挑选代表性的进行介绍\n\n"
-        f"收藏夹内容：\n{context}"
-    )
+def _build_overview_messages(context: str, question: str) -> list:
+    system = overview_system_prompt(context)
     return [
-        {"role": "system", "content": system},
-        {"role": "user", "content": question},
+        SystemMessage(content=system),
+        HumanMessage(content=question),
     ]
 
-def _build_rag_messages(context: str, question: str) -> list[dict]:
-    system = (
-        "你是一个知识库助手，基于用户收藏的视频内容回答问题。\n"
-        "请根据以下检索到的视频内容回答：\n"
-        "1. 直接回答问题，引用相关内容\n"
-        "2. 回答要自然、有条理\n"
-        "3. 可以引用视频标题作为来源\n\n"
-        f"相关内容：\n{context}"
-    )
+def _build_rag_messages(context: str, question: str) -> list:
+    system = qa_system_prompt(context)
     return [
-        {"role": "system", "content": system},
-        {"role": "user", "content": question},
+        SystemMessage(content=system),
+        HumanMessage(content=question),
     ]
 
-def _build_fallback_messages(context: str, question: str) -> list[dict]:
-    system = (
-        "你是一个收藏夹知识库助手。\n"
-        "用户的问题在现有知识库中没有检索到直接内容。\n"
-        "以下是用户收藏夹中的视频概览（如果为空说明用户还没入库）：\n"
-        f"{context}\n\n"
-        "请根据以上信息（如果有）：\n"
-        "1. 尝试回答用户问题\n"
-        "2. 如果没有任何视频信息，礼貌地告诉用户需要先在左侧选择收藏夹并点击「入库」或者「更新」\n"
-        "3. 保持像真人助手一样的语气，不要显示这是\"备选方案\""
-    )
+def _build_fallback_messages(context: str, question: str) -> list:
+    system = fallback_system_prompt(context=context)
     return [
-        {"role": "system", "content": system},
-        {"role": "user", "content": question},
+        SystemMessage(content=system),
+        HumanMessage(content=question),
     ]
 
-def _build_direct_messages(question: str) -> list[dict]:
+def _build_direct_messages(question: str) -> list:
     """通用回答（不查库）"""
-    system = (
-        "你是一个知识库问答助手。\n"
-        "请直接回答用户问题，避免引入收藏夹或知识库内容。"
-    )
+    system = direct_system_prompt(question)
     return [
-        {"role": "system", "content": system},
-        {"role": "user", "content": question},
+        SystemMessage(content=system),
+        HumanMessage(content=question),
     ]
 
-def _build_direct_messages_with_context(context: str, question: str) -> list[dict]:
+def _build_direct_messages_with_context(context: str, question: str) -> list:
     """带收藏夹上下文的通用回答（引导用户提问）"""
-    system = (
-        "你是一个知识库问答助手。\n"
-        "以下是用户收藏夹的概览（收藏夹名称与视频标题）：\n"
-        f"{context}\n\n"
-        "请先回答用户问题，再根据收藏夹内容引导用户提出与收藏相关的问题。"
-    )
+    system = direct_system_prompt(question, title_context=context)
     return [
-        {"role": "system", "content": system},
-        {"role": "user", "content": question},
+        SystemMessage(content=system),
+        HumanMessage(content=question),
     ]
 
-def _log_final_payload(route: str, messages: list[dict], sources: list[dict]) -> None:
+def _log_final_payload(route: str, messages: list, sources: list[dict]) -> None:
     """记录最终发送给 LLM 的内容与来源"""
     logger.info(f"最终路由: {route}")
     logger.info(f"最终消息: {messages}")
     logger.info(f"最终来源数量: {len(sources)}")
 
-def _build_db_list_messages(context: str, question: str) -> list[dict]:
+def _build_db_list_messages(context: str, question: str) -> list:
     """仅用标题/简介回答列表类问题"""
-    system = (
-        "你是一个收藏夹知识库助手。\n"
-        "用户需要清单/列表类答案，请基于以下视频标题与简介回答。\n"
-        "回答要：\n"
-        "1. 按收藏夹或主题分组\n"
-        "2. 只输出与问题相关的条目\n"
-        "3. 简洁清晰\n\n"
-        f"收藏夹内容：\n{context}"
-    )
+    system = db_list_system_prompt(context)
     return [
-        {"role": "system", "content": system},
-        {"role": "user", "content": question},
+        SystemMessage(content=system),
+        HumanMessage(content=question),
     ]
 
-def _build_db_summary_messages(context: str, question: str) -> list[dict]:
+def _build_db_summary_messages(context: str, question: str) -> list:
     """仅用数据库内容回答总结类问题"""
-    system = (
-        "你是一个收藏夹知识库助手。\n"
-        "用户需要总结/提炼，请基于以下视频内容回答。\n"
-        "回答要：\n"
-        "1. 提炼重点与要点\n"
-        "2. 结构清晰、可快速理解\n"
-        "3. 必要时引用视频标题作为来源\n\n"
-        f"收藏夹内容：\n{context}"
-    )
+    system = db_summary_system_prompt(context)
     return [
-        {"role": "system", "content": system},
-        {"role": "user", "content": question},
+        SystemMessage(content=system),
+        HumanMessage(content=question),
     ]
 
 def _is_list_question(question: str) -> bool:
@@ -188,31 +152,33 @@ def _route_with_rules(question: str, is_collection_intent: bool, related: bool) 
         return "direct"
     return "vector"
 
-def _route_with_llm(question: str) -> tuple[Optional[str], str]:
-    """使用 LLM 进行路由判断"""
+async def _route_with_llm(question: str) -> tuple[Optional[str], str]:
+    """使用 LLM 进行路由判断（LangChain 版本，支持 LangSmith 追踪）"""
     try:
-        client = _get_llm_client()
+        llm = _get_llm()
         system = (
-            "你是一个路由器，只输出以下之一：direct, db_list, db_content, vector。\n"
-            "规则：\n"
-            "- direct：寒暄/闲聊/与收藏无关的问题\n"
-            "- db_list：清单/列表/目录/有哪些\n"
-            "- db_content：明确要求“全部/所有/整体/概览/全库”内容的总结\n"
-            "- vector：具体主题问题或需要“先检索再总结”的问题\n"
-            "示例：\n"
-            "Q: 中西方文化的差异是什么，简单总结 -> vector\n"
-            "Q: 概览我收藏夹里所有王德峰相关内容 -> db_content\n"
-            "只输出一个词，不要解释。"
+            "你是一个查询路由专家。请根据用户问题，只输出以下四个标签之一：\n"
+            "- direct：寒暄、闲聊、通用知识问答，或与用户收藏夹完全无关的问题\n"
+            "- db_list：需要列出条目、清单、目录的问题（关键词：有哪些、有什么、列出、目录、清单）\n"
+            "- db_content：需要对收藏夹整体内容进行总结、概览、分析的问题（关键词：总结、概述、概览、全库、整体）\n"
+            "- vector：针对具体主题的深度问题，需要先从向量库检索相关内容再回答\n"
+            "\n"
+            "边界案例（务必注意）：\n"
+            "Q: 你好 / 你是谁 / 谢谢 -> direct\n"
+            "Q: 我收藏了哪些视频 / 有哪些关于哲学的视频 -> db_list\n"
+            "Q: 总结我收藏夹里所有内容 / 概览一下我的收藏 -> db_content\n"
+            "Q: 王德峰讲的中国哲学有什么核心观点 -> vector（需要先检索）\n"
+            "Q: 中西方文化的差异是什么 -> vector（具体主题，需检索）\n"
+            "Q: 除了王德峰，我还收藏了哪些哲学视频 -> db_list（列表类）\n"
+            "\n"
+            "只输出一个词（direct/db_list/db_content/vector），不要解释，不要加标点。"
         )
-        resp = client.chat.completions.create(
-            model=settings.llm_model,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": question},
-            ],
-            temperature=0,
-        )
-        text = (resp.choices[0].message.content or "").strip()
+        messages = [
+            SystemMessage(content=system),
+            HumanMessage(content=question),
+        ]
+        resp = await llm.ainvoke(messages, temperature=0)
+        text = (resp.content or "").strip()
         match = re.search(r"(direct|db_list|db_content|vector)", text)
         return (match.group(1) if match else None), text
     except Exception as e:
@@ -548,7 +514,7 @@ async def _get_video_titles_context(db: AsyncSession, folder_ids: List[int], lim
     context_parts = [f"【{folder_name}】\n" + "\n".join(videos) for folder_name, videos in grouped.items()]
     return "\n\n".join(context_parts)
 
-async def _prepare_messages(request: ChatRequest, db: AsyncSession, rewrite_result: Optional[RewriteResult] = None) -> tuple[list[dict], List[dict], str, Optional[RewriteResult]]:
+async def _prepare_messages(request: ChatRequest, db: AsyncSession, rewrite_result: Optional[RewriteResult] = None) -> tuple[list, List[dict], str, Optional[RewriteResult]]:
     """准备 LLM 消息与来源信息"""
     question = request.question.strip()
     rag = get_rag_service()
@@ -571,7 +537,7 @@ async def _prepare_messages(request: ChatRequest, db: AsyncSession, rewrite_resu
 
     # 1) LLM 路由优先，失败时降级规则路由
     logger.info(f"路由输入: question={question} folder_ids={folder_ids} has_data={has_data} is_collection_intent={is_collection_intent}")
-    route, route_raw = _route_with_llm(question)
+    route, route_raw = await _route_with_llm(question)
     route_source = "LLM"
     related: Optional[bool] = None
     if not route:
@@ -654,9 +620,9 @@ async def ask_question(request: ChatRequest, http_request: Request, db: AsyncSes
         logger.info(f"[QUERY_REWRITE] suggested_route={rewrite_result.suggested_route}, needs_rewrite={rewrite_result.needs_rewrite}")
 
         messages, sources, _, _ = await _prepare_messages(request, db, rewrite_result)
-        client = _get_llm_client()
-        response = client.chat.completions.create(model=settings.llm_model, messages=messages, temperature=0.5)
-        return ChatResponse(answer=response.choices[0].message.content or "", sources=sources[:5])
+        llm = _get_llm()
+        response = await llm.ainvoke(messages)
+        return ChatResponse(answer=response.content or "", sources=sources[:5])
     except HTTPException: raise
     except Exception as e:
         logger.error(f"问答失败: {e}")
@@ -713,7 +679,7 @@ async def ask_question_stream(request: ChatRequest, http_request: Request, db: A
         logger.info(f"[QUERY_REWRITE] suggested_route={rewrite_result.suggested_route}, needs_rewrite={rewrite_result.needs_rewrite}")
 
         messages, sources, _, _ = await _prepare_messages(request, db, rewrite_result)
-        client = _get_llm_client()
+        llm = _get_llm()
 
         # 获取 rewrite 信息用于附加到 sources
         rewrite = rewrite_result.rewrites[0] if rewrite_result.rewrites else None
@@ -725,18 +691,30 @@ async def ask_question_stream(request: ChatRequest, http_request: Request, db: A
                 "confidence": rewrite.confidence,
             }
 
-        def generate():
-            stream = client.chat.completions.create(model=settings.llm_model, messages=messages, temperature=0.5, stream=True)
-            for chunk in stream:
-                delta = chunk.choices[0].delta
-                if delta and delta.content: yield delta.content
-            # 附加 rewrite 信息到 sources
-            sources_with_rewrite = {
-                "sources": sources,
-                "rewrite_info": rewrite_info,
-            }
-            yield f"\n[[SOURCES_JSON]]{json.dumps(sources_with_rewrite, ensure_ascii=False)}"
-        return StreamingResponse(generate(), media_type="text/plain; charset=utf-8")
+        async def generate():
+            """标准 SSE 流式生成器（data: 前缀 + event type）"""
+            try:
+                async for chunk in llm.astream(messages):
+                    data = json.dumps({"type": "chunk", "content": chunk.content or ""}, ensure_ascii=False)
+                    yield f"data: {data}\n\n"
+
+                # 附加 sources 和 rewrite 信息
+                sources_payload = json.dumps({
+                    "type": "sources",
+                    "sources": sources,
+                    "rewrite_info": rewrite_info,
+                }, ensure_ascii=False)
+                yield f"data: {sources_payload}\n\n"
+
+                # 结束标记
+                done_payload = json.dumps({"type": "done"}, ensure_ascii=False)
+                yield f"data: {done_payload}\n\n"
+            except Exception as e:
+                logger.error(f"流式生成失败: {e}")
+                error_payload = json.dumps({"type": "error", "message": str(e)}, ensure_ascii=False)
+                yield f"data: {error_payload}\n\n"
+
+        return StreamingResponse(generate(), media_type="text/event-stream")
     except HTTPException: raise
     except Exception as e:
         logger.error(f"流式问答失败: {e}")
