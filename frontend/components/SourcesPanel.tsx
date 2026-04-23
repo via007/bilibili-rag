@@ -592,7 +592,7 @@ export default function SourcesPanel({
                                   )}
                                 </div>
                                 {isVideoExpanded && pages && (
-                                  <div className="pl-4 mt-1 space-y-1 overflow-hidden">
+                                  <div className="pl-4 mt-1 space-y-1 max-h-48 overflow-y-auto page-list-scroll">
                                     {pages.map((p) => {
                                       const vecStatus = pageVectorStatus[`${v.bvid}-${p.cid}`];
                                       return (
@@ -603,7 +603,7 @@ export default function SourcesPanel({
                                         >
                                           <span className="text-[var(--accent)]">▶</span>
                                           <span>P{p.page}:</span>
-                                          <span className="truncate flex-1">{p.title}</span>
+                                          <span className="truncate flex-1 min-w-0">{p.title}</span>
 
                                           <div className="page-actions">
                                             {/* 工作区勾选 */}
