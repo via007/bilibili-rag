@@ -31,7 +31,6 @@ export default function ChatPanel({ statsKey, sessionId, folderIds, workspacePag
   const [chatMode, setChatMode] = useState<"standard" | "agentic">("standard");
   const [showReasoning, setShowReasoning] = useState<Set<string>>(new Set());
   const endRef = useRef<HTMLDivElement>(null);
-  const marker = "[[SOURCES_JSON]]";
 
   useEffect(() => {
     knowledgeApi.getStats().then(setStats).catch(() => { });
@@ -98,7 +97,7 @@ export default function ChatPanel({ statsKey, sessionId, folderIds, workspacePag
       return;
     }
 
-    // 标准模式：流式
+    // 标准模式：流式（SSE 解析）
     try {
       const response = await fetch(`${API_BASE_URL}/chat/ask/stream`, {
         method: "POST",
@@ -120,49 +119,59 @@ export default function ChatPanel({ statsKey, sessionId, folderIds, workspacePag
       const reader = response.body.getReader();
       const decoder = new TextDecoder("utf-8");
       let done = false;
-      let buffer = "";
-      let sourcesJson = "";
-      let inSources = false;
+      let sseBuffer = "";
+      let contentBuffer = "";
 
       while (!done) {
         const { value, done: doneReading } = await reader.read();
         done = doneReading;
-        if (value) {
-          const chunk = decoder.decode(value, { stream: !done });
-          if (chunk) {
-            if (inSources) {
-              sourcesJson += chunk;
-            } else {
-              buffer += chunk;
-              const markerIndex = buffer.indexOf(marker);
-              if (markerIndex !== -1) {
-                const contentPart = buffer.slice(0, markerIndex);
-                sourcesJson = buffer.slice(markerIndex + marker.length);
-                buffer = contentPart;
-                inSources = true;
-              }
+        if (!value) continue;
+
+        sseBuffer += decoder.decode(value, { stream: !done });
+
+        // SSE 事件按 \n\n 分割
+        const events = sseBuffer.split("\n\n");
+        sseBuffer = events.pop() || ""; // 保留未完成的片段
+
+        for (const event of events) {
+          const lines = event.split("\n");
+          let dataLine = "";
+          for (const line of lines) {
+            if (line.startsWith("data:")) {
+              dataLine = line.slice(5).trim();
+            }
+          }
+          if (!dataLine) continue;
+
+          try {
+            const payload = JSON.parse(dataLine);
+            if (payload.type === "chunk") {
+              contentBuffer += payload.content || "";
               setMessages((prev) =>
                 prev.map((m) =>
-                  m.id === assistantId ? { ...m, content: buffer } : m
+                  m.id === assistantId ? { ...m, content: contentBuffer } : m
+                )
+              );
+            } else if (payload.type === "sources") {
+              const sources = Array.isArray(payload.sources) ? payload.sources : [];
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === assistantId ? { ...m, sources } : m
+                )
+              );
+            } else if (payload.type === "error") {
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === assistantId
+                    ? { ...m, content: `错误: ${payload.message || "流式生成失败"}` }
+                    : m
                 )
               );
             }
+            // type === "done" 无需处理
+          } catch {
+            // 忽略单行解析失败，继续处理后续事件
           }
-        }
-      }
-
-      if (sourcesJson) {
-        try {
-          const parsed = JSON.parse(sourcesJson);
-          if (Array.isArray(parsed)) {
-            setMessages((prev) =>
-              prev.map((m) =>
-                m.id === assistantId ? { ...m, sources: parsed } : m
-              )
-            );
-          }
-        } catch {
-          // 忽略解析错误，避免影响主文本
         }
       }
     } catch (e) {
@@ -233,9 +242,20 @@ export default function ChatPanel({ statsKey, sessionId, folderIds, workspacePag
               {messages.map((m) => (
                 <div key={m.id} className={`message ${m.role}`}>
                   <div className="message-bubble">
-                    <ReactMarkdown className="markdown" remarkPlugins={[remarkGfm]}>
-                      {m.content}
-                    </ReactMarkdown>
+                    {m.role === "assistant" && !m.content && loading ? (
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm text-[var(--muted)]">AI Thinking</span>
+                        <div className="flex gap-1">
+                          {[0, 1, 2].map((i) => (
+                            <div key={i} className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-pulse" style={{ animationDelay: `${i * 0.15}s` }} />
+                          ))}
+                        </div>
+                      </div>
+                    ) : (
+                      <ReactMarkdown className="markdown" remarkPlugins={[remarkGfm]}>
+                        {m.content}
+                      </ReactMarkdown>
+                    )}
                     {m.reasoningSteps && m.reasoningSteps.length > 0 && (
                       <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px dashed rgba(0,0,0,0.15)" }}>
                         <button
@@ -295,17 +315,6 @@ export default function ChatPanel({ statsKey, sessionId, folderIds, workspacePag
                   </div>
                 </div>
               ))}
-              {loading && (
-                <div className="message assistant">
-                  <div className="message-bubble">
-                    <div className="flex gap-1">
-                      {[0, 1, 2].map((i) => (
-                        <div key={i} className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-pulse" style={{ animationDelay: `${i * 0.15}s` }} />
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              )}
               <div ref={endRef} />
             </div>
           )}
@@ -313,7 +322,7 @@ export default function ChatPanel({ statsKey, sessionId, folderIds, workspacePag
       </div>
 
       <div className="panel-footer">
-        <div className="mb-2">
+        <div className="mb-4">
           <Tabs.Root value={chatMode} onValueChange={(v) => setChatMode(v as "standard" | "agentic")}>
             <Tabs.List className="mode-tabs-list">
               <Tabs.Indicator className="mode-tabs-indicator" />
