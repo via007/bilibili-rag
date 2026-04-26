@@ -20,6 +20,19 @@ class Settings(BaseSettings):
     openai_base_url: str = Field(default="https://api.openai.com/v1", env="OPENAI_BASE_URL")
     llm_model: str = Field(default="gpt-4-turbo", env="LLM_MODEL")
     embedding_model: str = Field(default="text-embedding-3-small", env="EMBEDDING_MODEL")
+    eval_llm_model: str = Field(default="gpt-4o-mini", env="EVAL_LLM_MODEL")
+
+    # Agentic RAG
+    agentic_rag_top_k: int = Field(default=5, env="AGENTIC_RAG_TOP_K")
+    agentic_rag_max_hops: int = Field(default=3, env="AGENTIC_RAG_MAX_HOPS")
+
+    # LangSmith (用于 LangChain / LangGraph 自动追踪，无需代码改动)
+    # 设置 LANGCHAIN_TRACING_V2=true 或 LANGSMITH_TRACING=true 并填入 API key 即可启用
+    langchain_tracing_v2: bool = Field(default=False, env="LANGCHAIN_TRACING_V2")
+    langsmith_tracing: bool = Field(default=False, env="LANGSMITH_TRACING")
+    langsmith_api_key: str = Field(default="", env="LANGSMITH_API_KEY")
+    langsmith_project: str = Field(default="bilibili-rag", env="LANGSMITH_PROJECT")
+    langsmith_endpoint: str = Field(default="https://api.smith.langchain.com", env="LANGSMITH_ENDPOINT")
 
     # DashScope ASR
     dashscope_base_url: str = Field(
@@ -47,7 +60,16 @@ class Settings(BaseSettings):
         default="./data/chroma_db",
         env="CHROMA_PERSIST_DIRECTORY"
     )
-    
+
+    # 分块策略配置（Phase 1: 增强规则分块）
+    chunk_target_size: int = Field(default=750, env="CHUNK_TARGET_SIZE")
+    chunk_min_size: int = Field(default=300, env="CHUNK_MIN_SIZE")
+    chunk_max_size: int = Field(default=900, env="CHUNK_MAX_SIZE")
+    chunk_overlap: int = Field(default=100, env="CHUNK_OVERLAP")
+
+    # Embedding 版本号（用于索引重建追踪）
+    embedding_version: str = Field(default="v1", env="EMBEDDING_VERSION")
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

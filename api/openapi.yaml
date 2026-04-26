@@ -1,0 +1,1983 @@
+openapi: 3.0.3
+info:
+  title: Bilibili RAG 知识库系统 API
+  description: |
+    B站收藏内容可检索知识库系统的 RESTful API 文档。
+
+    ## 核心能力
+
+    1. **数据获取** - B站扫码登录、收藏夹/视频列表同步
+    2. **内容提取** - ASR（语音转文本）、基础信息（标题/简介）
+    3. **知识构建** - 文本切块（chunking）、向量化（embedding）、存储到 ChromaDB
+    4. **智能问答（RAG）** - 查询路由（direct/db/vector）、向量检索+LLM生成、流式返回+来源追踪
+
+    ## 认证机制
+
+    - 使用 `session_id` 作为会话标识
+    - 扫码登录后获取 `session_id`
+    - 大部分接口需要携带 `session_id` 参数
+
+    ## SSE 流式响应
+
+    聊天接口 `/chat/ask/stream` 使用 Server-Sent Events 流式返回：
+    - 格式: `data: {chunk_text}`
+    - 结束后发送: `data: [[SOURCES_JSON]]{sources_json}`
+  version: 1.2.0
+  contact:
+    name: Bilibili RAG Project
+  license:
+    name: MIT
+
+servers:
+  - url: http://localhost:8000
+    description: 本地开发服务器
+
+tags:
+  - name: 认证
+    description: B站扫码登录与会话管理
+  - name: 对话
+    description: 智能问答与搜索
+  - name: 收藏夹
+    description: 收藏夹浏览与整理
+  - name: 知识库
+    description: 知识库构建与管理
+  - name: ASR
+    description: 分P视频语音转文本
+  - name: 分P向量化
+    description: 分P视频向量化入库
+
+paths:
+  # ========== 认证路由 ==========
+  /auth/qrcode:
+    get:
+      tags:
+        - 认证
+      summary: 生成登录二维码
+      description: |
+        调用 B站 接口生成扫码登录所需的二维码。
+
+        返回包含：
+        - `qrcode_key`: 二维码唯一标识
+        - `qrcode_url`: 二维码链接
+        - `qrcode_image_base64`: Base64 编码的二维码图片
+      operationId: generateQrcode
+      responses:
+        '200':
+          description: 成功返回二维码
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QRCodeResponse'
+              example:
+                qrcode_key: "8d5a0b9c7f6e4d3a2b1c0e9f8a7b6c5d"
+                qrcode_url: "https://passport.bilibili.com/login/qrcode/hello"
+                qrcode_image_base64: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+
+  /auth/qrcode/poll/{qrcode_key}:
+    get:
+      tags:
+        - 认证
+      summary: 轮询二维码登录状态
+      description: |
+        轮询扫码登录状态，支持以下状态：
+
+        | 状态 | 说明 |
+        |------|------|
+        | waiting | 等待扫码 |
+        | scanned | 已扫码，等待确认 |
+        | confirmed | 登录成功 |
+        | expired | 二维码已过期 |
+
+        登录成功后返回 `session_id`，需保存用于后续接口调用。
+      operationId: pollQrcodeStatus
+      parameters:
+        - name: qrcode_key
+          in: path
+          required: true
+          description: 二维码标识
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 登录状态
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginStatusResponse'
+              examples:
+                waiting:
+                  summary: 等待扫码
+                  value:
+                    status: "waiting"
+                    message: "等待扫码"
+                scanned:
+                  summary: 已扫码
+                  value:
+                    status: "scanned"
+                    message: "已扫码，等待确认"
+                confirmed:
+                  summary: 登录成功
+                  value:
+                    status: "confirmed"
+                    message: "登录成功"
+                    session_id: "abc123-def456-ghi789"
+                    user_info:
+                      mid: 12345678
+                      uname: "用户名"
+                      face: "https://avatar.example.com/face.jpg"
+                      level: 4
+
+  /auth/session/{session_id}:
+    get:
+      tags:
+        - 认证
+      summary: 获取会话信息
+      description: |
+        根据 session_id 获取当前登录用户的会话信息。
+
+        内部会检查：
+        1. 内存缓存
+        2. 数据库中的持久化会话
+      operationId: getSessionInfo
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          description: 会话ID
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 会话信息
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionInfo'
+        '404':
+          description: 会话不存在或已过期
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    delete:
+      tags:
+        - 认证
+      summary: 退出登录
+      description: |
+        清除会话信息，登出当前用户。
+      operationId: logout
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          description: 会话ID
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 退出成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "已退出登录"
+
+  # ========== 对话路由 ==========
+  /chat/ask:
+    post:
+      tags:
+        - 对话
+      summary: 智能问答（非流式）
+      description: |
+        基于收藏内容进行智能问答。
+
+        ### 路由策略
+
+        系统会自动选择最佳路由：
+
+        | 路由 | 说明 | 使用场景 |
+        |------|------|----------|
+        | direct | 直接回答 | 寒暄、闲聊 |
+        | db_list | 列表回答 | 清单/目录类问题 |
+        | db_content | 内容总结 | 总结/提炼类问题 |
+        | vector | 向量检索+RAG | 具体主题问题 |
+
+        ### 请求示例
+
+        ```json
+        {
+          "question": "机器学习有哪些经典算法？",
+          "session_id": "abc123",
+          "folder_ids": [123456, 789012]
+        }
+        ```
+      operationId: askQuestion
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatRequest'
+            example:
+              question: "机器学习有哪些经典算法？"
+              session_id: "abc123-def456"
+              folder_ids: [123456, 789012]
+      responses:
+        '200':
+          description: 问答结果
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatResponse'
+              example:
+                answer: "根据您收藏的视频内容，机器学习的经典算法主要包括：\n\n1. **监督学习算法**\n   - 线性回归\n   - 决策树\n   - 支持向量机（SVM）\n   - 神经网络\n\n2. **无监督学习算法**\n   - K-Means 聚类\n   - 层次聚类\n   - 主成分分析（PCA）"
+                sources:
+                  - bvid: "BV1xx411c7mD"
+                    title: "机器学习入门教程"
+                    url: "https://www.bilibili.com/video/BV1xx411c7mD"
+        '400':
+          description: 问题不能为空
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /chat/ask/stream:
+    post:
+      tags:
+        - 对话
+      summary: 流式智能问答
+      description: |
+        流式版本的智能问答，使用 Server-Sent Events 返回。
+
+        ### SSE 格式
+
+        ```
+        data: 你好
+        data: ，欢迎
+        data: 使用
+        ...
+        data: [[SOURCES_JSON]][{...}]
+        ```
+
+        最后一条消息以 `[[SOURCES_JSON]]` 开头，后面跟着 JSON 格式的来源信息。
+      operationId: askQuestionStream
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatRequest'
+      responses:
+        '200':
+          description: 流式响应
+          content:
+            text/plain:
+              schema:
+                type: string
+                format: binary
+              example: |
+                data: 根据您收藏的
+                data: 视频内容
+                data: ，
+                ...
+                data: [[SOURCES_JSON]][{"bvid":"BV1xx411c7mD","title":"机器学习教程","url":"https://www.bilibili.com/video/BV1xx411c7mD"}]
+        '400':
+          description: 问题不能为空
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /chat/search:
+    post:
+      tags:
+        - 对话
+      summary: 搜索相关视频片段
+      description: |
+        在向量库中搜索与查询相关的内容片段。
+
+        ### 说明
+
+        - 直接查询向量库，不经过 LLM 路由
+        - 返回匹配的视频片段和来源信息
+        - 支持自定义返回数量（默认 5 条）
+      operationId: searchVideos
+      parameters:
+        - name: query
+          in: query
+          required: true
+          description: 搜索查询
+          schema:
+            type: string
+        - name: k
+          in: query
+          required: false
+          description: 返回数量
+          schema:
+            type: integer
+            default: 5
+            minimum: 1
+            maximum: 20
+      responses:
+        '200':
+          description: 搜索结果
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/SearchResult'
+              example:
+                results:
+                  - bvid: "BV1xx411c7mD"
+                    title: "机器学习入门教程"
+                    url: "https://www.bilibili.com/video/BV1xx411c7mD"
+                    content_preview: "机器学习是人工智能的一个分支，它使用数据来训练模型..."
+
+  # ========== 收藏夹路由 ==========
+  /favorites/list:
+    get:
+      tags:
+        - 收藏夹
+      summary: 获取收藏夹列表
+      description: |
+        获取当前登录用户的所有收藏夹列表。
+
+        ### 返回字段说明
+
+        - `media_id`: 收藏夹ID
+        - `title`: 收藏夹名称
+        - `media_count`: 收藏夹内视频数量
+        - `is_selected`: 是否选中（默认 true）
+        - `is_default`: 是否默认收藏夹
+      operationId: getFavoritesList
+      parameters:
+        - name: session_id
+          in: query
+          required: true
+          description: 会话ID
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 收藏夹列表
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/FavoriteFolderInfo'
+              example:
+                - media_id: 123456
+                  title: "学习资料"
+                  media_count: 42
+                  is_selected: true
+                  is_default: false
+                - media_id: 789012
+                  title: "默认收藏夹"
+                  media_count: 15
+                  is_selected: true
+                  is_default: true
+        '401':
+          description: 未登录或会话已过期
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /favorites/{media_id}/videos:
+    get:
+      tags:
+        - 收藏夹
+      summary: 获取收藏夹视频（分页）
+      description: |
+        获取指定收藏夹中的视频列表，支持分页。
+
+        ### 分页参数
+
+        - `page`: 页码，从 1 开始
+        - `page_size`: 每页数量，默认 20，最大 20
+      operationId: getFavoriteVideos
+      parameters:
+        - name: media_id
+          in: path
+          required: true
+          description: 收藏夹媒体ID
+          schema:
+            type: integer
+        - name: session_id
+          in: query
+          required: true
+          description: 会话ID
+          schema:
+            type: string
+        - name: page
+          in: query
+          required: false
+          description: 页码
+          schema:
+            type: integer
+            default: 1
+            minimum: 1
+        - name: page_size
+          in: query
+          required: false
+          description: 每页数量
+          schema:
+            type: integer
+            default: 20
+            minimum: 1
+            maximum: 20
+      responses:
+        '200':
+          description: 收藏夹视频列表
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FavoriteVideosResponse'
+              example:
+                folder_info:
+                  title: "学习资料"
+                  media_count: 42
+                videos:
+                  - bvid: "BV1xx411c7mD"
+                    title: "Python 入门教程"
+                    cover: "https://i0.hdslb.com/bfs/archive/xxx.jpg"
+                    duration: "12:34"
+                    owner: "UP主名称"
+                    play_count: 12345
+                    intro: "Python 编程入门..."
+                    is_selected: true
+                has_more: true
+                page: 1
+                page_size: 20
+        '401':
+          description: 未登录
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /favorites/{media_id}/all-videos:
+    get:
+      tags:
+        - 收藏夹
+      summary: 获取收藏夹所有视频
+      description: |
+        获取指定收藏夹中的所有视频（用于构建知识库）。
+
+        ### 注意事项
+
+        - 自动过滤失效视频（已删除、已下架等）
+        - 返回所有有效视频信息
+        - 包含 `cid` 字段，用于后续 ASR 处理
+      operationId: getAllFavoriteVideos
+      parameters:
+        - name: media_id
+          in: path
+          required: true
+          description: 收藏夹媒体ID
+          schema:
+            type: integer
+        - name: session_id
+          in: query
+          required: true
+          description: 会话ID
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 所有视频列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total:
+                    type: integer
+                    description: 有效视频总数
+                  videos:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/VideoInfo'
+              example:
+                total: 42
+                videos:
+                  - bvid: "BV1xx411c7mD"
+                    title: "Python 入门教程"
+                    cover: "https://i0.hdslb.com/bfs/archive/xxx.jpg"
+                    duration: "12:34"
+                    owner: "UP主名称"
+                    cid: 12345678
+        '401':
+          description: 未登录
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /favorites/organize/preview:
+    post:
+      tags:
+        - 收藏夹
+      summary: 预览收藏夹整理
+      description: |
+        预览按已有收藏夹名称对默认收藏夹内容分类的结果。
+
+        ### 功能说明
+
+        - 获取默认收藏夹中的所有视频
+        - 按已有收藏夹名称进行匹配
+        - 返回预览结果供用户确认
+      operationId: organizePreview
+      parameters:
+        - name: session_id
+          in: query
+          required: true
+          description: 会话ID
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrganizePreviewRequest'
+      responses:
+        '200':
+          description: 预览结果
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrganizePreviewResponse'
+        '401':
+          description: 未登录
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /favorites/organize/execute:
+    post:
+      tags:
+        - 收藏夹
+      summary: 执行收藏夹整理
+      description: |
+        根据预览结果批量移动收藏夹内容。
+
+        ### 请求格式
+
+        - `default_folder_id`: 默认收藏夹ID（源）
+        - `moves`: 移动操作列表
+
+        ### 移动格式
+
+        ```json
+        {
+          "resource_id": 123,
+          "resource_type": 2,
+          "target_folder_id": 456
+        }
+        ```
+      operationId: organizeExecute
+      parameters:
+        - name: session_id
+          in: query
+          required: true
+          description: 会话ID
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrganizeExecuteRequest'
+      responses:
+        '200':
+          description: 执行结果
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  moved:
+                    type: integer
+                  groups:
+                    type: integer
+              example:
+                message: "移动完成"
+                moved: 15
+                groups: 3
+        '401':
+          description: 未登录
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /favorites/organize/clean-invalid:
+    post:
+      tags:
+        - 收藏夹
+      summary: 清理失效内容
+      description: |
+        清理指定收藏夹中的失效内容（已删除、已下架视频）。
+      operationId: cleanInvalidResources
+      parameters:
+        - name: session_id
+          in: query
+          required: true
+          description: 会话ID
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CleanInvalidRequest'
+      responses:
+        '200':
+          description: 清理完成
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  data:
+                    type: object
+              example:
+                message: "清理完成"
+                data:
+                  deleted: 5
+
+  # ========== 知识库路由 ==========
+  /knowledge/stats:
+    get:
+      tags:
+        - 知识库
+      summary: 获取知识库统计
+      description: |
+        获取当前知识库的统计信息。
+
+        ### 返回信息
+
+        - `total_chunks`: 向量块总数
+        - `total_videos`: 索引视频数
+        - `collection_name`: 收藏夹名称
+      operationId: getKnowledgeStats
+      responses:
+        '200':
+          description: 知识库统计
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KnowledgeStats'
+              example:
+                total_chunks: 1250
+                total_videos: 86
+                collection_name: "bilibili_videos"
+
+  /knowledge/folders/status:
+    get:
+      tags:
+        - 知识库
+      summary: 获取收藏夹入库状态
+      description: |
+        获取各收藏夹的索引状态信息。
+
+        ### 说明
+
+        - 跨 Session 查找同一用户的数据
+        - 按 media_id 去重
+        - 返回每个收藏夹的索引进度
+      operationId: getFolderStatus
+      parameters:
+        - name: session_id
+          in: query
+          required: true
+          description: 会话ID
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 收藏夹状态列表
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/FolderStatus'
+              example:
+                - media_id: 123456
+                  indexed_count: 42
+                  media_count: 45
+                  last_sync_at: "2026-03-30T10:30:00"
+                - media_id: 789012
+                  indexed_count: 30
+                  media_count: 30
+                  last_sync_at: "2026-03-29T15:20:00"
+
+  /knowledge/folders/sync:
+    post:
+      tags:
+        - 知识库
+      summary: 同步收藏夹到向量库
+      description: |
+        将收藏夹内容同步到向量知识库。
+
+        ### 处理流程
+
+        1. 获取收藏夹视频列表
+        2. 过滤失效视频
+        3. 获取/更新视频内容（ASR/简介）
+        4. 向量化存储到 ChromaDB
+        5. 更新数据库关联
+
+        ### 处理策略
+
+        - 新增视频：直接入库
+        - 已存在视频：比较内容，必要时更新
+        - 已删除视频：从向量库移除
+      operationId: syncFolders
+      parameters:
+        - name: session_id
+          in: query
+          required: true
+          description: 会话ID
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SyncRequest'
+      responses:
+        '200':
+          description: 同步结果
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SyncResult'
+              example:
+                - folder_id: 123456
+                  total: 45
+                  added: 5
+                  removed: 2
+                  indexed: 43
+                  message: "同步完成"
+                  last_sync_at: "2026-03-30T10:30:00"
+
+  /knowledge/build:
+    post:
+      tags:
+        - 知识库
+      summary: 构建知识库（后台任务）
+      description: |
+        后台构建知识库任务。
+
+        ### 说明
+
+        - 异步执行，不阻塞请求
+        - 返回 `task_id` 用于查询进度
+        - 支持多收藏夹批量处理
+
+        ### 进度查询
+
+        使用返回的 `task_id` 调用 `/knowledge/build/status/{task_id}` 查询进度。
+      operationId: buildKnowledgeBase
+      parameters:
+        - name: session_id
+          in: query
+          required: true
+          description: 会话ID
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BuildRequest'
+            example:
+              folder_ids: [123456, 789012]
+              exclude_bvids: ["BV1xx411c7mD"]
+      responses:
+        '200':
+          description: 任务已启动
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  task_id:
+                    type: string
+                  message:
+                    type: string
+              example:
+                task_id: "550e8400-e29b-41d4-a716-446655440000"
+                message: "构建任务已启动"
+
+  /knowledge/build/status/{task_id}:
+    get:
+      tags:
+        - 知识库
+      summary: 获取构建任务状态
+      description: |
+        查询知识库构建任务的执行状态。
+
+        ### 任务状态
+
+        | 状态 | 说明 |
+        |------|------|
+        | pending | 等待中 |
+        | running | 执行中 |
+        | completed | 已完成 |
+        | failed | 失败 |
+      operationId: getBuildStatus
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          description: 任务ID
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 任务状态
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BuildStatus'
+              example:
+                task_id: "550e8400-e29b-41d4-a716-446655440000"
+                status: "running"
+                progress: 65
+                current_step: "处理: Python 入门教程"
+                total_videos: 100
+                processed_videos: 65
+                message: "同步中..."
+        '404':
+          description: 任务不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /knowledge/clear:
+    delete:
+      tags:
+        - 知识库
+      summary: 清空知识库
+      description: |
+        清空所有向量数据。
+
+        ### ⚠️ 警告
+
+        此操作不可逆，将删除所有已索引的内容。
+      operationId: clearKnowledgeBase
+      responses:
+        '200':
+          description: 已清空
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+              example:
+                message: "知识库已清空"
+
+  /knowledge/video/{bvid}:
+    delete:
+      tags:
+        - 知识库
+      summary: 删除单个视频
+      description: |
+        从知识库中删除指定视频的向量数据。
+      operationId: deleteVideo
+      parameters:
+        - name: bvid
+          in: path
+          required: true
+          description: 视频BV号
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 已删除
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+              example:
+                message: "已删除视频 BV1xx411c7mD"
+
+  # ========== ASR 分P转写 ==========
+  /asr/content:
+    get:
+      tags:
+        - ASR
+      summary: 查询 ASR 内容
+      description: |
+        查询指定分P的 ASR 转写内容。
+
+        - 不存在返回 `{exists: false}`
+        - 存在返回内容详情
+      operationId: getASRContent
+      parameters:
+        - name: bvid
+          in: query
+          required: true
+          description: 视频BV号
+          schema:
+            type: string
+        - name: cid
+          in: query
+          required: true
+          description: 分P的CID
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: ASR内容
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ASRContentResponse'
+              example:
+                exists: true
+                bvid: "BV1xx411c7mD"
+                cid: 12345678
+                page_index: 0
+                page_title: "P1: 课程介绍"
+                content: "欢迎来到本课程..."
+                content_source: "asr"
+                version: 1
+                is_processed: true
+
+  /asr/create:
+    post:
+      tags:
+        - ASR
+      summary: 创建 ASR 任务
+      description: |
+        幂等创建 ASR 转写任务。
+
+        - 已存在且 `is_processed=true` → 直接返回
+        - 不存在 → 创建记录并启动后台任务
+      operationId: createASR
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ASRCreateRequest'
+            example:
+              bvid: "BV1xx411c7mD"
+              cid: 12345678
+              page_index: 0
+              page_title: "P1: 课程介绍"
+      responses:
+        '200':
+          description: 任务创建结果
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  task_id:
+                    type: string
+                    nullable: true
+                  message:
+                    type: string
+                  version:
+                    type: integer
+              example:
+                task_id: "550e8400-e29b-41d4-a716-446655440000"
+                message: "ASR 任务已创建"
+        '409':
+          description: ASR 已完成，无需重复创建
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  task_id:
+                    type: string
+                    nullable: true
+                  message:
+                    type: string
+
+  /asr/update:
+    post:
+      tags:
+        - ASR
+      summary: 更新 ASR 内容
+      description: |
+        手动编辑并覆盖 ASR 转写内容。不新建版本，直接覆盖当前内容。
+      operationId: updateASR
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ASRUpdateRequest'
+            example:
+              bvid: "BV1xx411c7mD"
+              cid: 12345678
+              page_index: 0
+              content: "手动编辑后的内容..."
+      responses:
+        '200':
+          description: 更新成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  message:
+                    type: string
+              example:
+                success: true
+                message: "更新成功"
+        '404':
+          description: ASR 记录不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /asr/reasr:
+    post:
+      tags:
+        - ASR
+      summary: 重新 ASR
+      description: |
+        强制重新执行 ASR 转写。
+
+        - 将当前内容保存到版本历史
+        - 清空当前内容，启动新的 ASR 任务
+      operationId: reASR
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ASRReASRRequest'
+            example:
+              bvid: "BV1xx411c7mD"
+              cid: 12345678
+              page_index: 0
+      responses:
+        '200':
+          description: 重新 ASR 已启动
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  task_id:
+                    type: string
+                  message:
+                    type: string
+              example:
+                task_id: "550e8400-e29b-41d4-a716-446655440000"
+                message: "重新 ASR 已启动"
+        '404':
+          description: ASR 记录不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /asr/status/{task_id}:
+    get:
+      tags:
+        - ASR
+      summary: 查询 ASR 任务状态
+      description: 轮询 ASR 后台任务的执行状态。
+      operationId: getASRTaskStatus
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          description: 任务ID
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 任务状态
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ASRTaskStatus'
+              example:
+                task_id: "550e8400-e29b-41d4-a716-446655440000"
+                status: "processing"
+                progress: 65
+                message: "转写中..."
+        '404':
+          description: 任务不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /asr/versions:
+    get:
+      tags:
+        - ASR
+      summary: 查询 ASR 版本历史
+      description: 获取指定分P的 ASR 版本历史列表。
+      operationId: getASRVersions
+      parameters:
+        - name: bvid
+          in: query
+          required: true
+          description: 视频BV号
+          schema:
+            type: string
+        - name: cid
+          in: query
+          required: true
+          description: 分P的CID
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: 版本历史列表
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/VideoPageVersionInfo'
+              example:
+                - version: 1
+                  content_source: "asr"
+                  content_preview: "欢迎来到本课程..."
+                  is_latest: false
+                  created_at: "2026-04-01T10:00:00"
+                - version: 2
+                  content_source: "asr"
+                  content_preview: "欢迎来到本课程（修正版）..."
+                  is_latest: true
+                  created_at: "2026-04-02T10:00:00"
+
+  # ========== 分P向量化 ==========
+  /vec/page/status:
+    get:
+      tags:
+        - 分P向量化
+      summary: 查询分P向量状态
+      description: |
+        查询指定分P的向量化状态，包含 ChromaDB 实际向量数量校验。
+
+        会自动修复不一致状态：
+        - DB 标记 done 但 ChromaDB 为空 → 降级为 failed
+        - DB 标记 pending 但 ChromaDB 有数据 → 升级为 done
+      operationId: getVectorPageStatus
+      parameters:
+        - name: bvid
+          in: query
+          required: true
+          description: 视频BV号
+          schema:
+            type: string
+        - name: cid
+          in: query
+          required: true
+          description: 分P的CID
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: 向量状态
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VectorPageStatusResponse'
+              example:
+                exists: true
+                bvid: "BV1xx411c7mD"
+                cid: 12345678
+                page_index: 0
+                page_title: "P1: 课程介绍"
+                is_processed: true
+                is_vectorized: "done"
+                vector_chunk_count: 15
+                chroma_exists: true
+
+  /vec/page/create:
+    post:
+      tags:
+        - 分P向量化
+      summary: 创建向量化任务
+      description: |
+        幂等创建分P向量化任务。
+
+        - 若 ASR 未完成，会先等待 ASR 完成再执行向量化
+        - 已是最新向量则直接跳过
+      operationId: createVectorPage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VectorPageCreateRequest'
+            example:
+              bvid: "BV1xx411c7mD"
+              cid: 12345678
+              page_index: 0
+              page_title: "P1: 课程介绍"
+      responses:
+        '200':
+          description: 任务创建结果
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  task_id:
+                    type: string
+                    nullable: true
+                  message:
+                    type: string
+              example:
+                task_id: "550e8400-e29b-41d4-a716-446655440000"
+                message: "向量化任务已创建"
+
+  /vec/page/revector:
+    post:
+      tags:
+        - 分P向量化
+      summary: 重新向量化
+      description: |
+        强制重建分P向量：删除旧向量，重新执行向量化。
+
+        要求 ASR 已完成（有内容）。
+      operationId: reVectorPage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VectorPageReVectorRequest'
+            example:
+              bvid: "BV1xx411c7mD"
+              cid: 12345678
+      responses:
+        '200':
+          description: 重建任务已创建
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  task_id:
+                    type: string
+                  message:
+                    type: string
+              example:
+                task_id: "550e8400-e29b-41d4-a716-446655440000"
+                message: "重建任务已创建"
+        '400':
+          description: ASR 未完成
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: VideoPage 不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /vec/page/status/{task_id}:
+    get:
+      tags:
+        - 分P向量化
+      summary: 查询向量化任务状态
+      description: |
+        轮询向量化后台任务的执行状态，含 steps 子步骤透传。
+      operationId: getVectorPageTaskStatus
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          description: 任务ID
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 任务状态
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VectorPageTaskStatus'
+              example:
+                task_id: "550e8400-e29b-41d4-a716-446655440000"
+                status: "processing"
+                progress: 65
+                message: "处理中..."
+                steps:
+                  - name: "chunk"
+                    status: "done"
+                    progress: 100
+                  - name: "embedding"
+                    status: "processing"
+                    progress: 60
+        '404':
+          description: 任务不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+components:
+  schemas:
+    # ========== 认证相关 ==========
+    QRCodeResponse:
+      type: object
+      required:
+        - qrcode_key
+        - qrcode_url
+        - qrcode_image_base64
+      properties:
+        qrcode_key:
+          type: string
+          description: 二维码唯一标识
+        qrcode_url:
+          type: string
+          description: 二维码链接
+        qrcode_image_base64:
+          type: string
+          description: Base64 编码的二维码图片
+
+    LoginStatusResponse:
+      type: object
+      required:
+        - status
+        - message
+      properties:
+        status:
+          type: string
+          enum: [waiting, scanned, confirmed, expired]
+          description: 登录状态
+        message:
+          type: string
+          description: 状态消息
+        session_id:
+          type: string
+          description: 会话ID（登录成功时返回）
+        user_info:
+          $ref: '#/components/schemas/UserInfo'
+
+    UserInfo:
+      type: object
+      properties:
+        mid:
+          type: integer
+          description: 用户ID
+        uname:
+          type: string
+          description: 用户名
+        face:
+          type: string
+          description: 头像URL
+        level:
+          type: integer
+          description: 用户等级
+
+    SessionInfo:
+      type: object
+      properties:
+        valid:
+          type: boolean
+        user_info:
+          $ref: '#/components/schemas/UserInfo'
+
+    # ========== 对话相关 ==========
+    ChatRequest:
+      type: object
+      required:
+        - question
+      properties:
+        question:
+          type: string
+          description: 问题内容
+          minLength: 1
+        session_id:
+          type: string
+          description: 会话ID
+        folder_ids:
+          type: array
+          items:
+            type: integer
+          description: 收藏夹ID列表
+
+    ChatResponse:
+      type: object
+      properties:
+        answer:
+          type: string
+          description: 回答内容
+        sources:
+          type: array
+          items:
+            $ref: '#/components/schemas/Source'
+          description: 来源列表
+
+    Source:
+      type: object
+      properties:
+        bvid:
+          type: string
+          description: 视频BV号
+        title:
+          type: string
+          description: 视频标题
+        url:
+          type: string
+          description: 视频链接
+
+    SearchResult:
+      type: object
+      properties:
+        bvid:
+          type: string
+        title:
+          type: string
+        url:
+          type: string
+        content_preview:
+          type: string
+
+    # ========== 收藏夹相关 ==========
+    FavoriteFolderInfo:
+      type: object
+      properties:
+        media_id:
+          type: integer
+          description: 收藏夹ID
+        title:
+          type: string
+          description: 收藏夹标题
+        media_count:
+          type: integer
+          description: 视频数量
+        is_selected:
+          type: boolean
+          description: 是否选中
+        is_default:
+          type: boolean
+          description: 是否默认收藏夹
+
+    FavoriteVideosResponse:
+      type: object
+      properties:
+        folder_info:
+          type: object
+          properties:
+            title:
+              type: string
+            media_count:
+              type: integer
+        videos:
+          type: array
+          items:
+            $ref: '#/components/schemas/FavoriteVideoItem'
+        has_more:
+          type: boolean
+        page:
+          type: integer
+        page_size:
+          type: integer
+
+    FavoriteVideoItem:
+      type: object
+      properties:
+        bvid:
+          type: string
+        title:
+          type: string
+        cover:
+          type: string
+        duration:
+          type: string
+        owner:
+          type: string
+        play_count:
+          type: integer
+        intro:
+          type: string
+        is_selected:
+          type: boolean
+
+    VideoInfo:
+      type: object
+      properties:
+        bvid:
+          type: string
+        title:
+          type: string
+        cover:
+          type: string
+        duration:
+          type: string
+        owner:
+          type: string
+        cid:
+          type: integer
+          description: 视频CID（用于ASR）
+
+    OrganizePreviewRequest:
+      type: object
+      required:
+        - folder_id
+      properties:
+        folder_id:
+          type: integer
+          description: 默认收藏夹ID
+
+    OrganizePreviewResponse:
+      type: object
+      properties:
+        default_folder_id:
+          type: integer
+        default_folder_title:
+          type: string
+        folders:
+          type: array
+          items:
+            $ref: '#/components/schemas/FavoriteFolderInfo'
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/OrganizePreviewItem'
+        stats:
+          type: object
+          properties:
+            total:
+              type: integer
+            matched:
+              type: integer
+            unmatched:
+              type: integer
+
+    OrganizePreviewItem:
+      type: object
+      properties:
+        bvid:
+          type: string
+        title:
+          type: string
+        resource_id:
+          type: integer
+        resource_type:
+          type: integer
+        target_folder_id:
+          type: integer
+          nullable: true
+        target_folder_title:
+          type: string
+        reason:
+          type: string
+          nullable: true
+
+    OrganizeExecuteRequest:
+      type: object
+      required:
+        - default_folder_id
+        - moves
+      properties:
+        default_folder_id:
+          type: integer
+        moves:
+          type: array
+          items:
+            $ref: '#/components/schemas/OrganizeMoveItem'
+
+    OrganizeMoveItem:
+      type: object
+      properties:
+        resource_id:
+          type: integer
+        resource_type:
+          type: integer
+        target_folder_id:
+          type: integer
+
+    CleanInvalidRequest:
+      type: object
+      required:
+        - folder_id
+      properties:
+        folder_id:
+          type: integer
+
+    # ========== 知识库相关 ==========
+    KnowledgeStats:
+      type: object
+      properties:
+        total_chunks:
+          type: integer
+        total_videos:
+          type: integer
+        collection_name:
+          type: string
+
+    FolderStatus:
+      type: object
+      properties:
+        media_id:
+          type: integer
+        indexed_count:
+          type: integer
+        media_count:
+          type: integer
+          nullable: true
+        last_sync_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    SyncRequest:
+      type: object
+      properties:
+        folder_ids:
+          type: array
+          items:
+            type: integer
+          description: 收藏夹ID列表（为空则同步所有）
+
+    SyncResult:
+      type: object
+      properties:
+        folder_id:
+          type: integer
+        total:
+          type: integer
+        added:
+          type: integer
+        removed:
+          type: integer
+        indexed:
+          type: integer
+        message:
+          type: string
+        last_sync_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    BuildRequest:
+      type: object
+      required:
+        - folder_ids
+      properties:
+        folder_ids:
+          type: array
+          items:
+            type: integer
+          description: 要处理的收藏夹ID列表
+        exclude_bvids:
+          type: array
+          items:
+            type: string
+          description: 排除的视频BV号
+
+    BuildStatus:
+      type: object
+      properties:
+        task_id:
+          type: string
+        status:
+          type: string
+          enum: [pending, running, completed, failed]
+        progress:
+          type: integer
+          minimum: 0
+          maximum: 100
+        current_step:
+          type: string
+        total_videos:
+          type: integer
+        processed_videos:
+          type: integer
+        message:
+          type: string
+
+    # ========== ASR 分P ==========
+    ASRCreateRequest:
+      type: object
+      required:
+        - bvid
+        - cid
+      properties:
+        bvid:
+          type: string
+          description: 视频BV号
+        cid:
+          type: integer
+          description: 分P的CID
+        page_index:
+          type: integer
+          description: P序号（0-based）
+          default: 0
+        page_title:
+          type: string
+          description: 分P标题
+          nullable: true
+
+    ASRUpdateRequest:
+      type: object
+      required:
+        - bvid
+        - cid
+        - page_index
+        - content
+      properties:
+        bvid:
+          type: string
+        cid:
+          type: integer
+        page_index:
+          type: integer
+        content:
+          type: string
+          description: 手动编辑的ASR内容
+
+    ASRReASRRequest:
+      type: object
+      required:
+        - bvid
+        - cid
+        - page_index
+      properties:
+        bvid:
+          type: string
+        cid:
+          type: integer
+        page_index:
+          type: integer
+
+    ASRContentResponse:
+      type: object
+      required:
+        - exists
+      properties:
+        exists:
+          type: boolean
+          description: 是否存在ASR记录
+        bvid:
+          type: string
+          nullable: true
+        cid:
+          type: integer
+          nullable: true
+        page_index:
+          type: integer
+          nullable: true
+        page_title:
+          type: string
+          nullable: true
+        content:
+          type: string
+          description: ASR转写全文
+          nullable: true
+        content_source:
+          type: string
+          description: 内容来源（asr / user_edit）
+          nullable: true
+        version:
+          type: integer
+          nullable: true
+        is_processed:
+          type: boolean
+          nullable: true
+
+    ASRTaskStatus:
+      type: object
+      required:
+        - task_id
+        - status
+        - progress
+        - message
+      properties:
+        task_id:
+          type: string
+        status:
+          type: string
+          enum: [pending, processing, done, failed]
+        progress:
+          type: integer
+          minimum: 0
+          maximum: 100
+        message:
+          type: string
+
+    VideoPageVersionInfo:
+      type: object
+      required:
+        - version
+        - content_source
+        - content_preview
+        - is_latest
+      properties:
+        version:
+          type: integer
+        content_source:
+          type: string
+        content_preview:
+          type: string
+        is_latest:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+
+    # ========== 分P向量化 ==========
+    VectorPageStatusResponse:
+      type: object
+      required:
+        - exists
+        - is_processed
+        - is_vectorized
+        - vector_chunk_count
+        - chroma_exists
+      properties:
+        exists:
+          type: boolean
+          description: 是否存在VideoPage记录
+        bvid:
+          type: string
+          nullable: true
+        cid:
+          type: integer
+          nullable: true
+        page_index:
+          type: integer
+          nullable: true
+        page_title:
+          type: string
+          nullable: true
+        is_processed:
+          type: boolean
+          description: ASR是否完成
+        content_preview:
+          type: string
+          description: 内容预览（前200字符）
+          nullable: true
+        is_vectorized:
+          type: string
+          enum: [pending, processing, done, failed]
+          description: 向量化状态
+        vectorized_at:
+          type: string
+          format: date-time
+          nullable: true
+        vector_chunk_count:
+          type: integer
+          default: 0
+        vector_error:
+          type: string
+          nullable: true
+        chroma_exists:
+          type: boolean
+          description: ChromaDB中是否实际存在向量
+        steps:
+          type: array
+          items:
+            type: object
+          nullable: true
+          description: 子步骤状态
+
+    VectorPageTaskStatus:
+      type: object
+      required:
+        - task_id
+        - status
+        - progress
+        - message
+      properties:
+        task_id:
+          type: string
+        status:
+          type: string
+          enum: [pending, processing, done, failed]
+        progress:
+          type: integer
+        message:
+          type: string
+        steps:
+          type: array
+          items:
+            type: object
+          nullable: true
+        result:
+          type: object
+          nullable: true
+        error:
+          type: string
+          nullable: true
+
+    VectorPageCreateRequest:
+      type: object
+      required:
+        - bvid
+        - cid
+      properties:
+        bvid:
+          type: string
+        cid:
+          type: integer
+        page_index:
+          type: integer
+          default: 0
+        page_title:
+          type: string
+          nullable: true
+
+    VectorPageReVectorRequest:
+      type: object
+      required:
+        - bvid
+        - cid
+      properties:
+        bvid:
+          type: string
+        cid:
+          type: integer
+
+    # ========== 通用 ==========
+    ErrorResponse:
+      type: object
+      properties:
+        detail:
+          type: string
+          description: 错误详情

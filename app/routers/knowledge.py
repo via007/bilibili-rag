@@ -12,12 +12,14 @@ from sqlalchemy import select, func, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db, get_db_context
-from app.models import FavoriteFolder, FavoriteVideo, VideoCache, UserSession, ContentSource, VideoContent
+from app.models import FavoriteFolder, FavoriteVideo, VideoCache, UserSession, ContentSource, VideoContent, VideoPageInfo, VideoPagesResponse
 from app.services.bilibili import BilibiliService
 from app.services.content_fetcher import ContentFetcher
 from app.services.asr import ASRService
 from app.services.rag import RAGService
 from app.routers.auth import get_session
+from app.utils.cache import get_cache_service, cache_dependency_singleton
+import re
 
 router = APIRouter(prefix="/knowledge", tags=["知识库"])
 
@@ -732,3 +734,70 @@ async def delete_video_from_knowledge(bvid: str):
     except Exception as e:
         logger.error(f"删除视频失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== 视频分P旁路缓存 ====================
+
+PAGES_CACHE_KEY = "video:pages:{bvid}"
+PAGES_CACHE_TTL = 86400  # 24小时
+
+
+@router.get("/video/{bvid}/pages", response_model=VideoPagesResponse)
+async def get_video_pages(
+    bvid: str,
+    cache=Depends(cache_dependency_singleton()),
+):
+    """
+    获取视频全部分P信息（旁路缓存策略）
+
+    缓存未命中 → 调 B站 API → 写入缓存（TTL=24h）→ 返回
+    缓存命中 → 直接返回
+    """
+    # 1. 校验 bvid 格式
+    if not re.match(r"^[Bb][Vv][a-zA-Z0-9]{10}$", bvid):
+        raise HTTPException(status_code=400, detail="Invalid bvid format")
+
+    cache_key = PAGES_CACHE_KEY.format(bvid=bvid)
+
+    # 2. 查缓存
+    cached = cache.get(cache_key)
+    if cached:
+        return VideoPagesResponse(**cached)
+
+    # 3. 缓存未命中，调 B站 API
+    bili = BilibiliService()
+    try:
+        video_info = await bili.get_video_info(bvid)
+    except Exception as e:
+        logger.error(f"[PAGES] B站 API 调用失败 bvid={bvid}: {e}")
+        raise HTTPException(status_code=502, detail=f"B站 API 调用失败: {e}")
+    finally:
+        await bili.close()
+
+    pages_raw = video_info.get("pages") or []
+    page_count = len(pages_raw) if pages_raw else 1
+
+    # 4. 构建响应数据
+    data = {
+        "bvid": bvid,
+        "title": video_info.get("title", ""),
+        "pages": [
+            VideoPageInfo(
+                cid=p.get("cid"),
+                page=p.get("page"),
+                title=p.get("part", ""),
+                duration=p.get("duration", 0),
+            )
+            for p in pages_raw
+        ],
+        "page_count": page_count,
+    }
+
+    # 5. 写入缓存（降级：缓存失败仍返回数据）
+    try:
+        cache.set(cache_key, data)
+    except Exception as e:
+        logger.warning(f"[PAGES] 缓存写入失败 bvid={bvid}: {e}")
+
+    return VideoPagesResponse(**data)
+

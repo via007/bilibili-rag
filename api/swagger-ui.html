@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bilibili RAG API 文档</title>
+    <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5.9.0/swagger-ui.css">
+    <style>
+        :root {
+            --primary-color: #00a1d6;
+            --secondary-color: #25b8d4;
+        }
+        body {
+            margin: 0;
+            padding: 0;
+        }
+        .swagger-ui .topbar {
+            background-color: var(--primary-color);
+        }
+        .swagger-ui .topbar .download-url-wrapper {
+            display: none;
+        }
+        .swagger-ui .info .title {
+            color: var(--primary-color);
+        }
+        .swagger-ui .btn.execute {
+            background-color: var(--primary-color);
+            border-color: var(--primary-color);
+        }
+        .swagger-ui .btn.execute:hover {
+            background-color: var(--secondary-color);
+            border-color: var(--secondary-color);
+        }
+    </style>
+</head>
+<body>
+    <div id="swagger-ui"></div>
+
+    <script src="https://unpkg.com/swagger-ui-dist@5.9.0/swagger-ui-bundle.js"></script>
+    <script src="https://unpkg.com/swagger-ui-dist@5.9.0/swagger-ui-standalone-preset.js"></script>
+    <script>
+        window.onload = function() {
+            const ui = SwaggerUIBundle({
+                url: "./openapi.yaml",
+                dom_id: '#swagger-ui',
+                deepLinking: true,
+                presets: [
+                    SwaggerUIBundle.presets.apis,
+                    SwaggerUIStandalonePreset
+                ],
+                layout: "StandaloneLayout",
+                docExpansion: "list",
+                filter: true,
+                operationsSorter: "method",
+                tagsSorter: "alpha",
+                persistAuthorization: true,
+                tryItOutEnabled: true,
+                requestSnippetsEnabled: true,
+                requestSnippets: [
+                    {
+                        title: "Example Request",
+                        value: "curl -X 'POST' \\\n  'http://localhost:8000/chat/ask' \\\n  -H 'Content-Type: application/json' \\\n  -d '{\n    \"question\": \"机器学习有哪些经典算法？\",\n    \"session_id\": \"your-session-id\",\n    \"folder_ids\": [123456]\n  }'"
+                    }
+                ],
+                onComplete: function() {
+                    console.log("Swagger UI loaded successfully");
+                }
+            });
+            window.ui = ui;
+        };
+    </script>
+</body>
+</html>

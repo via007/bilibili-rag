@@ -29,9 +29,49 @@ async_session_factory = async_sessionmaker(
 
 
 async def init_db():
-    """初始化数据库（创建表）"""
+    """初始化数据库（创建表 + 自动迁移新列）"""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+    # 自动迁移：为已有表添加新字段（SQLite 不支持 ALTER TABLE ADD COLUMN 已存在列，故用尝试式）
+    await _migrate_add_columns()
+
+
+async def _migrate_add_columns():
+    """为已有表添加 Plan 006 新增的列
+
+    video_pages 新增: is_vectorized, vectorized_at, vector_chunk_count, vector_error
+    async_tasks 新增: (全新表，无迁移需求)
+    """
+    migrations = [
+        # (table, column, type_with_default)
+        ("video_pages", "is_vectorized", "VARCHAR(20) DEFAULT 'pending'"),
+        ("video_pages", "vectorized_at", "TIMESTAMP"),
+        ("video_pages", "vector_chunk_count", "INTEGER DEFAULT 0"),
+        ("video_pages", "vector_error", "TEXT"),
+    ]
+
+    for table, column, col_def in migrations:
+        try:
+            async with engine.begin() as conn:
+                from sqlalchemy import text
+                # SQLite: 检查列是否已存在
+                result = await conn.execute(
+                    text(f"PRAGMA table_info({table})")
+                )
+                existing_cols = [row[1] for row in result.fetchall()]
+                if column not in existing_cols:
+                    await conn.execute(
+                        text(f"ALTER TABLE {table} ADD COLUMN {column} {col_def}")
+                    )
+                    from loguru import logger
+                    logger.info(f"[MIGRATION] Added column {table}.{column}")
+                else:
+                    from loguru import logger
+                    logger.debug(f"[MIGRATION] Column {table}.{column} already exists, skipping")
+        except Exception as e:
+            from loguru import logger
+            logger.warning(f"[MIGRATION] Could not add {table}.{column}: {e}")
 
 
 async def get_db() -> AsyncSession:

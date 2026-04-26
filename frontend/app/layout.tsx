@@ -1,6 +1,9 @@
 import type { Metadata } from "next";
-import { ZCOOL_XiaoWei, Noto_Sans_SC } from "next/font/google";
+import { ZCOOL_XiaoWei, Noto_Sans_SC, Geist } from "next/font/google";
 import "./globals.css";
+import { cn } from "@/lib/utils";
+
+const geist = Geist({subsets:['latin'],variable:'--font-sans'});
 
 const display = ZCOOL_XiaoWei({
   subsets: ["latin"],
@@ -28,7 +31,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="zh-CN">
+    <html lang="zh-CN" className={cn("font-sans", geist.variable)}>
       <body className={`${display.variable} ${body.variable} antialiased`}>
         {children}
       </body>

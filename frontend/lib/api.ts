@@ -76,6 +76,21 @@ export interface Video {
     play_count?: number;
     intro?: string;
     is_selected: boolean;
+    page_count?: number;
+}
+
+export interface VideoPageInfo {
+    cid: number;
+    page: number;       // 1-based
+    title: string;     // B站 part 字段
+    duration: number;
+}
+
+export interface VideoPagesResponse {
+    bvid: string;
+    title: string;
+    pages: VideoPageInfo[];
+    page_count: number;
 }
 
 export interface FavoriteVideosResponse {
@@ -157,6 +172,50 @@ export interface ChatResponse {
         title: string;
         url: string;
     }>;
+}
+
+export interface ReasoningStep {
+    step: number;
+    action: string;
+    query: string;
+    reasoning: string;
+    verdict?: string | null;
+    recall_score?: number | null;
+    sources: Array<{
+        bvid: string;
+        title: string;
+        url: string;
+    }>;
+    content_preview: string;
+}
+
+export interface AgenticChatResponse {
+    answer: string;
+    sources: Array<{
+        bvid: string;
+        title: string;
+        url: string;
+    }>;
+    reasoning_steps: ReasoningStep[];
+    synthesis_method: string;
+    hops_used: number;
+    avg_recall_score: number;
+}
+
+// 工作区页面（用户选中的已向量化分P）
+export interface WorkspacePage {
+    bvid: string;
+    cid: number;
+    page_index: number;
+    page_title?: string;
+}
+
+// 对话请求载荷（统一构造方式）
+export interface ChatRequestPayload {
+    question: string;
+    session_id?: string;
+    folder_ids?: number[];
+    workspace_pages?: WorkspacePage[];
 }
 
 // ==================== API 函数 ====================
@@ -274,15 +333,26 @@ export const knowledgeApi = {
     // 删除视频
     deleteVideo: (bvid: string) =>
         request<{ message: string }>(`/knowledge/video/${bvid}`, { method: "DELETE" }),
+
+    // 获取视频分P列表
+    getVideoPages: (bvid: string) =>
+        request<VideoPagesResponse>(`/knowledge/video/${bvid}/pages`),
 };
 
 // 对话相关
 export const chatApi = {
-    // 提问
-    ask: (question: string, sessionId?: string, folderIds?: number[]) =>
+    // 提问（标准模式）
+    ask: (payload: ChatRequestPayload) =>
         request<ChatResponse>("/chat/ask", {
             method: "POST",
-            body: JSON.stringify({ question, session_id: sessionId, folder_ids: folderIds }),
+            body: JSON.stringify(payload),
+        }),
+
+    // 提问（Agentic RAG 模式）
+    askAgentic: (payload: ChatRequestPayload) =>
+        request<AgenticChatResponse>("/chat/ask/agentic", {
+            method: "POST",
+            body: JSON.stringify(payload),
         }),
 
     // 搜索
@@ -291,4 +361,136 @@ export const chatApi = {
             `/chat/search?query=${encodeURIComponent(query)}&k=${k}`,
             { method: "POST" }
         ),
+};
+
+// ==================== 分P向量化相关 ====================
+
+export interface VectorPageStatusResponse {
+  exists: boolean;
+  bvid?: string;
+  cid?: number;
+  page_index?: number;
+  page_title?: string;
+  is_processed: boolean;
+  content_preview?: string;
+  is_vectorized: "pending" | "processing" | "done" | "failed";
+  vectorized_at?: string;
+  vector_chunk_count: number;
+  vector_error?: string;
+  chroma_exists: boolean;
+}
+
+export interface VectorPageTaskStatus {
+  task_id: string;
+  status: "pending" | "processing" | "done" | "failed";
+  progress: number;
+  message: string;
+  result?: { chunk_count?: number };
+  error?: string;
+}
+
+export const vecPageApi = {
+  // 查询向量状态
+  getStatus: (bvid: string, cid: number) =>
+    request<VectorPageStatusResponse>(
+      `/vec/page/status?bvid=${bvid}&cid=${cid}`
+    ),
+
+  // 发起向量化（幂等）
+  create: (params: { bvid: string; cid: number; page_index: number; page_title?: string }) =>
+    request<{ task_id: string | null; message: string }>(
+      "/vec/page/create",
+      {
+        method: "POST",
+        body: JSON.stringify(params),
+      }
+    ),
+
+  // 强制重新向量化
+  revector: (params: { bvid: string; cid: number }) =>
+    request<{ task_id: string; message: string }>(
+      "/vec/page/revector",
+      {
+        method: "POST",
+        body: JSON.stringify(params),
+      }
+    ),
+
+  // 轮询任务状态
+  getTaskStatus: (taskId: string) =>
+    request<VectorPageTaskStatus>(`/vec/page/status/${taskId}`),
+};
+
+// ==================== ASR 分P相关 ====================
+
+export interface ASRContentResponse {
+    exists: boolean;
+    bvid?: string;
+    cid?: number;
+    page_index?: number;
+    page_title?: string;
+    content?: string;
+    content_source?: "asr" | "user_edit";
+    version?: number;
+    is_processed?: boolean;
+}
+
+export interface ASRTaskStatus {
+    task_id: string;
+    status: "pending" | "processing" | "done" | "failed";
+    progress: number;
+    message: string;
+}
+
+export interface VideoPageVersionInfo {
+    version: number;
+    content_source: string;
+    content_preview: string;
+    is_latest: boolean;
+    created_at: string;
+}
+
+// ASR 分P相关
+export const asrApi = {
+    // 查询 ASR 内容
+    getContent: (bvid: string, cid: number) =>
+        request<ASRContentResponse>(`/asr/content?bvid=${bvid}&cid=${cid}`),
+
+    // 发起 ASR（幂等）
+    create: (params: { bvid: string; cid: number; page_index: number; page_title?: string }) =>
+        request<{ task_id: string | null; message: string; version?: number }>(
+            "/asr/create",
+            {
+                method: "POST",
+                body: JSON.stringify(params),
+            }
+        ),
+
+    // 手动编辑更新
+    update: (params: { bvid: string; cid: number; page_index: number; content: string }) =>
+        request<{ success: boolean; message: string }>(
+            "/asr/update",
+            {
+                method: "POST",
+                body: JSON.stringify(params),
+            }
+        ),
+
+    // 强制重新 ASR
+    reasr: (params: { bvid: string; cid: number; page_index: number }) =>
+        request<{ task_id: string; message: string }>(
+            "/asr/reasr",
+            {
+                method: "POST",
+                body: JSON.stringify(params),
+            }
+        ),
+
+    // 轮询任务状态
+    getStatus: (taskId: string) =>
+        request<ASRTaskStatus>(`/asr/status/${taskId}`),
+
+    // 查询版本历史
+    getVersions: (bvid: string, cid: number) =>
+        request<VideoPageVersionInfo[]>(`/asr/versions?bvid=${bvid}&cid=${cid}`),
 };

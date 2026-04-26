@@ -60,3 +60,10 @@ logs/
 node_modules/
 package-lock.json
 frontend/package-lock.json
+
+
+# CLAUDE
+.claude/
+plan/
+architecture/
+CLAUDE.md

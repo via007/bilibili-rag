@@ -7,13 +7,16 @@ from typing import List, Optional
 from loguru import logger
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_chroma import Chroma
-from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.schema import Document
-from langchain.prompts import ChatPromptTemplate
-from langchain.schema.runnable import RunnablePassthrough
-from langchain.schema.output_parser import StrOutputParser
+from langchain_core.messages import SystemMessage, HumanMessage
 from app.config import settings
 from app.models import VideoContent
+from app.services.rag.chunking import SemanticChunker
+from app.services.rag.prompts import (
+    qa_system_prompt,
+    fallback_system_prompt,
+    summary_system_prompt,
+)
 
 
 class RAGService:
@@ -65,65 +68,29 @@ class RAGService:
             model=settings.llm_model,
             temperature=0.5
         )
-        
-        # 文本分割器
-        self.text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1000,
-            chunk_overlap=200,
-            separators=["\n\n", "\n", "。", "！", "？", ".", "!", "?", " "]
+
+        # 语义分块器（替代 RecursiveCharacterTextSplitter）
+        self.chunker = SemanticChunker(
+            target_size=getattr(settings, "chunk_target_size", 750),
+            min_size=getattr(settings, "chunk_min_size", 300),
+            max_size=getattr(settings, "chunk_max_size", 900),
+            overlap=getattr(settings, "chunk_overlap", 100),
         )
-        
-        # 问答提示模板
-        self.qa_prompt = ChatPromptTemplate.from_messages([
-            ("system", """你是一个知识库助手，专门基于用户收藏的 B站视频内容来回答问题。
-
-请遵循以下规则：
-1. 根据提供的视频内容来回答问题
-2. 回答要自然、友好、有条理
-3. 可以引用相关的视频标题作为来源
-4. 如果多个视频涉及相同话题，请综合它们的内容
-
-视频内容：
-{context}
-"""),
-            ("human", "{question}")
-        ])
-        
-        # 无内容时的通用回复模板
-        self.fallback_prompt = ChatPromptTemplate.from_messages([
-            ("system", """你是一个友好的助手。用户在使用一个B站收藏夹知识库系统。
-
-当前情况：知识库中没有找到与用户问题相关的内容。
-
-请：
-1. 友好地回应用户的问题
-2. 如果能根据常识简单回答，可以简要回答
-3. 建议用户构建更多收藏夹内容，或者换个问法
-4. 保持自然、不要死板
-"""),
-            ("human", "{question}")
-        ])
-        
-        # 摘要提示模板
-        self.summary_prompt = ChatPromptTemplate.from_messages([
-            ("system", """你是一个内容总结专家。请对以下视频字幕内容进行总结。
-
-要求：
-1. 提取核心要点（3-5个）
-2. 生成一段简洁的总结（100-200字）
-3. 保持原意，不要添加额外信息
-
-字幕内容："""),
-            ("human", "{content}")
-        ])
     
-    def add_video_content(self, video: VideoContent) -> int:
+    def add_video_content(
+        self,
+        video: VideoContent,
+        page_index: int = 0,
+        page_title: Optional[str] = None,
+    ) -> int:
         """
         添加单个视频内容到向量库
-        
+
         Args:
             video: VideoContent 对象
-            
+            page_index: 分P序号（0-based），默认 0
+            page_title: 分P标题，默认 None
+
         Returns:
             添加的文档块数量
         """
@@ -148,51 +115,95 @@ class RAGService:
                 content_parts.append(outline_text)
         
         full_content = "\n\n".join(content_parts).strip()
-        
+
         # 验证内容不为空
         if not full_content or len(full_content.strip()) < 10:
             logger.warning(f"[{video.bvid}] 内容太少，跳过")
             return 0
-        
-        # 分块
-        chunks = self.text_splitter.split_text(full_content)
-        
-        if not chunks:
-            logger.warning(f"[{video.bvid}] 没有生成文档块")
+
+        # 语义分块（Phase 1: 增强规则分块 + Phase 2: embedding 输入策略）
+        chunk_results = self.chunker.chunk(
+            text=full_content,
+            video_title=title,
+            page_title=page_title or title,
+            outline=video.outline,
+        )
+
+        if not chunk_results:
+            logger.warning(f"[{video.bvid}] 语义分块后无有效文档块")
             return 0
-        
-        # 过滤空内容块
-        valid_chunks = [c for c in chunks if c and c.strip() and len(c.strip()) > 5]
-        if not valid_chunks:
-            logger.warning(f"[{video.bvid}] 没有有效的文档块")
-            return 0
-        
-        # 创建文档
+
+        # Phase 4: 可观测性 — 分块统计日志（供 LangSmith / 本地调试使用）
+        chunk_lengths = [len(c.display_text) for c in chunk_results]
+        logger.info(
+            f"[VECTORIZE_TRACE] bvid={video.bvid} page={page_index} "
+            f"raw_len={len(full_content)} chunk_count={len(chunk_results)} "
+            f"avg_len={sum(chunk_lengths)//max(len(chunk_lengths),1)} "
+            f"min_len={min(chunk_lengths)} max_len={max(chunk_lengths)} "
+            f"has_outline={bool(video.outline)}"
+        )
+
+        # 创建文档（Phase 3: metadata 增强）
+        embedding_version = getattr(settings, "embedding_version", "v1")
         documents = []
-        for i, chunk in enumerate(valid_chunks):
+        for i, result in enumerate(chunk_results):
+            chunk_id = f"{video.bvid}:{page_index}:{i}"
             doc = Document(
-                page_content=chunk.strip(),  # 确保是干净的字符串
+                page_content=result.embedding_text,  # 含标题前缀，用于 embedding + LLM 上下文
                 metadata={
                     "bvid": video.bvid,
                     "title": title,
+                    "page_index": page_index,
+                    "page_title": page_title or title,
                     "source": video.source.value,
                     "chunk_index": i,
-                    "url": f"https://www.bilibili.com/video/{video.bvid}"
+                    "chunk_id": chunk_id,
+                    "section_title": result.section_title or "",
+                    "content_type": result.content_type,
+                    "embedding_version": embedding_version,
+                    "url": f"https://www.bilibili.com/video/{video.bvid}?p={page_index + 1}",
                 }
             )
             documents.append(doc)
-        
+
         # 添加到向量库
         try:
             batch_size = 10
             for idx in range(0, len(documents), batch_size):
                 self.vectorstore.add_documents(documents[idx:idx + batch_size])
-            logger.info(f"[{video.bvid}] 添加了 {len(documents)} 个文档块")
+            logger.info(
+                f"[VECTORIZE_TRACE] bvid={video.bvid} page={page_index} "
+                f"write_success=True chunks_written={len(documents)} "
+                f"embedding_model={settings.embedding_model} "
+                f"embedding_version={embedding_version}"
+            )
         except Exception as e:
-            logger.error(f"[{video.bvid}] 添加到向量库失败: {e}")
+            logger.error(
+                f"[VECTORIZE_TRACE] bvid={video.bvid} page={page_index} "
+                f"write_success=False error={e}"
+            )
             raise
-        
+
         return len(documents)
+
+    def _get_page_vector_ids(self, bvid: str, page_index: int) -> List[str]:
+        """
+        先按 bvid 获取全部 chunk，再在 Python 侧过滤 page_index，
+        避免 Chroma 多条件 where 在不同版本下的兼容性问题。
+        """
+        result = self.vectorstore._collection.get(
+            where={"bvid": bvid},
+            include=["metadatas"]
+        )
+        ids = result.get("ids", [])
+        metadatas = result.get("metadatas", [])
+        matched_ids: List[str] = []
+
+        for doc_id, metadata in zip(ids, metadatas):
+            if metadata and metadata.get("page_index") == page_index:
+                matched_ids.append(doc_id)
+
+        return matched_ids
     
     def add_videos_batch(self, videos: List[VideoContent], progress_callback=None) -> dict:
         """
@@ -228,19 +239,66 @@ class RAGService:
             "chunks": total_chunks
         }
     
-    def search(self, query: str, k: int = 5, bvids: Optional[List[str]] = None) -> List[Document]:
+    def search(
+        self,
+        query: str,
+        k: int = 5,
+        bvids: Optional[List[str]] = None,
+        workspace_pages: Optional[List[dict]] = None,
+    ) -> List[Document]:
         """
         检索相关内容
+
+        Args:
+            query: 查询文本
+            k: 召回数量
+            bvids: 可选，限制在这些视频范围内搜索
+            workspace_pages: 可选，工作区选中的分P列表，用于精确过滤。
+                             格式: [{"bvid": "BVxxx", "cid": 123, "page_index": 0}, ...]
         """
         if not query or not query.strip():
             logger.warning("检索查询为空")
             return []
-            
+
         try:
-            if bvids:
-                docs = self.vectorstore.similarity_search(query, k=k, filter={"bvid": {"$in": bvids}})
+            # 构建过滤条件
+            filter_cond = None
+            if workspace_pages:
+                # 工作区模式：精确匹配 bvid + page_index
+                conditions = []
+                for wp in workspace_pages:
+                    bvid_val = wp.get("bvid")
+                    page_idx = wp.get("page_index", 0)
+                    # 诊断：检查是否有异常类型
+                    if not isinstance(bvid_val, str):
+                        logger.warning(f"[RAG_SEARCH_DEBUG] workspace_pages 中 bvid 类型异常: type={type(bvid_val)}, value={repr(bvid_val)[:50]}")
+                    if not isinstance(page_idx, int):
+                        logger.warning(f"[RAG_SEARCH_DEBUG] workspace_pages 中 page_index 类型异常: type={type(page_idx)}, value={repr(page_idx)[:50]}")
+                    conditions.append({
+                        "bvid": bvid_val,
+                        "page_index": page_idx
+                    })
+                if conditions:
+                    # Chroma 的 $or 需要用 where_document 配合
+                    # 这里用简化的方式：先用 bvids 过滤，再在结果中过滤 page_index
+                    try:
+                        wp_bvids = list(set(wp.get("bvid") for wp in workspace_pages))
+                    except TypeError as te:
+                        logger.warning(f"[RAG_SEARCH_DEBUG] wp_bvids set 构建失败: {te}")
+                        raise
+                    filter_cond = {"bvid": {"$in": wp_bvids}}
+            elif bvids:
+                filter_cond = {"bvid": {"$in": bvids}}
+
+            if filter_cond:
+                docs = self.vectorstore.similarity_search(query, k=k, filter=filter_cond)
             else:
                 docs = self.vectorstore.similarity_search(query, k=k)
+
+            # 工作区模式：进一步按 page_index 精确过滤
+            if workspace_pages:
+                wp_set = {(wp.get("bvid"), wp.get("page_index", 0)) for wp in workspace_pages}
+                docs = [d for d in docs if (d.metadata.get("bvid"), d.metadata.get("page_index", 0)) in wp_set]
 
             logger.info(f"检索完成：query='{query}'，召回={len(docs)}")
             for idx, doc in enumerate(docs):
@@ -256,26 +314,26 @@ class RAGService:
             logger.warning(f"向量检索失败: {e}")
             return []
     
-    async def _fallback_answer(self, question: str, reason: str = "") -> dict:
+    async def _fallback_answer(self, question: str, reason: str = "", context: str = "") -> dict:
         """
         当没有检索到内容时，让 AI 自然回复
-        
+
         Args:
             question: 用户问题
             reason: 原因说明
-            
+            context: 可选的收藏夹概览上下文
+
         Returns:
             回答结果
         """
         try:
-            chain = (
-                {"question": RunnablePassthrough()}
-                | self.fallback_prompt
-                | self.llm
-                | StrOutputParser()
-            )
-            
-            answer = await chain.ainvoke(question)
+            system_prompt = fallback_system_prompt(context=context, reason=reason)
+            messages = [
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=question),
+            ]
+            response = await self.llm.ainvoke(messages)
+            answer = str(response.content or "").strip()
             return {
                 "answer": answer,
                 "sources": []
@@ -328,10 +386,17 @@ class RAGService:
             bvid = doc.metadata.get("bvid", "")
             title = doc.metadata.get("title", "未知标题")
             content = doc.page_content.strip()
-            
-            if content:  # 只添加有内容的文档
-                context_parts.append(f"【{title}】\n{content}")
-            
+
+            if not content:
+                continue
+
+            # page_content 现在已是 embedding_text（含标题前缀），
+            # 但旧数据可能没有。做兼容：若内容不以标题开头则补标题。
+            if not content.startswith(title):
+                content = f"【{title}】\n{content}"
+
+            context_parts.append(content)
+
             if bvid and bvid not in seen_bvids:
                 seen_bvids.add(bvid)
                 sources.append({
@@ -356,17 +421,16 @@ class RAGService:
                 "sources": sources
             }
         
-        # 构建链并执行
+        # 构建消息并调用 LLM
         try:
-            chain = (
-                {"context": lambda _: context, "question": RunnablePassthrough()}
-                | self.qa_prompt
-                | self.llm
-                | StrOutputParser()
-            )
-            
-            answer = await chain.ainvoke(question)
-            
+            system_prompt = qa_system_prompt(context)
+            messages = [
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=question),
+            ]
+            response = await self.llm.ainvoke(messages)
+            answer = str(response.content or "").strip()
+
             return {
                 "answer": answer,
                 "sources": sources
@@ -393,14 +457,13 @@ class RAGService:
         if len(content) > max_length:
             content = content[:max_length] + "\n...(内容已截断)"
         
-        chain = (
-            {"content": RunnablePassthrough()}
-            | self.summary_prompt
-            | self.llm
-            | StrOutputParser()
-        )
-        
-        return await chain.ainvoke(content)
+        system_prompt = summary_system_prompt()
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=content),
+        ]
+        response = await self.llm.ainvoke(messages)
+        return str(response.content or "").strip()
     
     def get_collection_stats(self) -> dict:
         """
@@ -445,7 +508,7 @@ class RAGService:
     def delete_video(self, bvid: str):
         """
         删除指定视频的所有文档块
-        
+
         Args:
             bvid: 视频 BV 号
         """
@@ -455,3 +518,37 @@ class RAGService:
         except Exception as e:
             logger.error(f"删除视频失败 [{bvid}]: {e}")
             raise
+
+    def delete_page_vectors(self, bvid: str, page_index: int):
+        """
+        删除指定分P的所有文档块
+
+        Args:
+            bvid: 视频 BV 号
+            page_index: 分P序号（0-based）
+        """
+        try:
+            ids = self._get_page_vector_ids(bvid, page_index)
+            if ids:
+                self.vectorstore._collection.delete(ids=ids)
+            logger.info(f"已删除分P向量: {bvid} P{page_index + 1}")
+        except Exception as e:
+            logger.error(f"删除分P向量失败 [{bvid} P{page_index + 1}]: {e}")
+            raise
+
+    def get_page_vector_count(self, bvid: str, page_index: int) -> int:
+        """
+        获取指定分P的向量块数量
+
+        Args:
+            bvid: 视频 BV 号
+            page_index: 分P序号（0-based）
+
+        Returns:
+            向量块数量
+        """
+        try:
+            return len(self._get_page_vector_ids(bvid, page_index))
+        except Exception as e:
+            logger.warning(f"获取分P向量数量失败 [{bvid} P{page_index + 1}]: {e}")
+            return 0
