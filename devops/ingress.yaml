@@ -1,0 +1,50 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: bilibili-rag-ingress
+  namespace: bilibili-rag
+  labels:
+    app.kubernetes.io/name: bilibili-rag
+  annotations:
+    # 使用 nginx ingress controller
+    kubernetes.io/ingress.class: nginx
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+    # WebSocket / SSE 支持（聊天流式返回）
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+spec:
+  rules:
+    - host: bilibili-rag.example.com  # 替换为实际域名
+      http:
+        paths:
+          # API 路由到后端
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: bilibili-rag-backend
+                port:
+                  number: 8000
+          - path: /docs
+            pathType: Prefix
+            backend:
+              service:
+                name: bilibili-rag-backend
+                port:
+                  number: 8000
+          - path: /health
+            pathType: Exact
+            backend:
+              service:
+                name: bilibili-rag-backend
+                port:
+                  number: 8000
+          # 其余路由到前端
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: bilibili-rag-frontend
+                port:
+                  number: 3000

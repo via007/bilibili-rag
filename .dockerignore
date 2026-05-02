@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+
+# Node
+node_modules/
+.next/
+out/
+
+# 数据目录（容器内挂载，不打包进镜像）
+data/
+logs/
+
+# 环境配置（通过环境变量注入）
+.env
+.env.local
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Test
+test/
+*_test.py
+
+# OS
+.DS_Store
+Thumbs.db

@@ -174,29 +174,50 @@ class BilibiliService:
     async def get_user_favorites(self, mid: int = None) -> List[Dict[str, Any]]:
         """
         获取用户的所有收藏夹
-        
+
         Args:
             mid: 用户 ID，不传则使用当前登录用户
-            
+
         Returns:
             收藏夹列表
         """
         if mid is None:
             mid = self.dedeuserid
-            
+
         if not mid:
             raise Exception("未指定用户 ID")
-        
+
+        try:
+            mid = int(mid)
+        except (ValueError, TypeError):
+            raise Exception(f"用户 ID 格式错误: {mid}")
+
         url = f"{self.BASE_URL}/x/v3/fav/folder/created/list-all"
         params = {"up_mid": mid}
-        
+
         response = await self.client.get(url, params=params, cookies=self._get_cookies())
-        data = response.json()
-        
-        if data["code"] != 0:
-            raise Exception(f"获取收藏夹失败: {data['message']}")
-        
-        return data["data"]["list"] or []
+
+        try:
+            data = response.json()
+        except Exception as e:
+            body_preview = response.text[:500] if hasattr(response, "text") else "N/A"
+            logger.warning(f"[BILIBILI] 收藏夹接口返回非 JSON: status={response.status_code} body={body_preview}")
+            raise Exception(f"收藏夹接口返回异常: HTTP {response.status_code}")
+
+        if not isinstance(data, dict):
+            raise Exception(f"收藏夹接口返回格式异常: {type(data).__name__}")
+
+        code = data.get("code")
+        if code != 0:
+            msg = data.get("message") or data.get("msg") or f"未知错误 (code={code})"
+            logger.warning(f"[BILIBILI] 获取收藏夹失败: code={code} msg={msg}")
+            raise Exception(f"获取收藏夹失败: {msg}")
+
+        inner_data = data.get("data") or {}
+        if not isinstance(inner_data, dict):
+            return []
+
+        return inner_data.get("list") or []
     
     async def get_favorite_content(
         self, 

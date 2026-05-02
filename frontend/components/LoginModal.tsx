@@ -83,13 +83,13 @@ export default function LoginModal({ isOpen, onClose, onSuccess }: Props) {
           {status === "success" && (
             <div className="w-48 h-48 flex flex-col items-center justify-center">
               <div className="status-pill">登录成功</div>
-              <p className="text-sm text-[var(--muted)] mt-3">正在进入工作台</p>
+              <p className="text-sm text-[var(--muted-foreground)] mt-3">正在进入工作台</p>
             </div>
           )}
 
           {status === "error" && (
             <div className="w-48 h-48 flex flex-col items-center justify-center">
-              <p className="text-sm text-[var(--muted)] mb-3">二维码已过期</p>
+              <p className="text-sm text-[var(--muted-foreground)] mb-3">二维码已过期</p>
               <button onClick={getQR} className="btn btn-primary">重新获取</button>
             </div>
           )}

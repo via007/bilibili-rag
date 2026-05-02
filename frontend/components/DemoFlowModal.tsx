@@ -88,12 +88,12 @@ export default function DemoFlowModal({ isOpen, onClose }: Props) {
         <div className="demo-grid mt-4 text-sm">
           <div className="demo-preview">
             <div>
-              <div className="text-[var(--muted)] text-xs mb-1">提问</div>
+              <div className="text-[var(--muted-foreground)] text-xs mb-1">提问</div>
               <div className="input">{typed || "..."}</div>
             </div>
 
             <div className="flex items-center justify-between mt-3">
-              <div className="text-xs text-[var(--muted)]">
+              <div className="text-xs text-[var(--muted-foreground)]">
                 {step === "searching" && "系统正在检索你的收藏夹内容..."}
                 {step === "answering" && "系统正在生成结构化答案..."}
                 {step === "done" && "演示完成，可继续追问"}
@@ -105,7 +105,7 @@ export default function DemoFlowModal({ isOpen, onClose }: Props) {
             </div>
 
             <div className="mt-3">
-              <div className="text-[var(--muted)] text-xs mb-1">回答</div>
+              <div className="text-[var(--muted-foreground)] text-xs mb-1">回答</div>
               <div className="message-bubble message assistant demo-answer">
                 <div className="markdown whitespace-pre-line">
                   {answerTyped || " "}
@@ -115,7 +115,7 @@ export default function DemoFlowModal({ isOpen, onClose }: Props) {
 
             {step === "done" && (
               <div className="demo-sources">
-                <div className="text-[var(--muted)] text-xs mb-1">来源</div>
+                <div className="text-[var(--muted-foreground)] text-xs mb-1">来源</div>
                 <div className="source-list">
                   {sources.map((s, i) => (
                     <span key={i} className="source-link">

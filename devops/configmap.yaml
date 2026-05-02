@@ -1,0 +1,39 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bilibili-rag-config
+  namespace: bilibili-rag
+  labels:
+    app.kubernetes.io/name: bilibili-rag
+data:
+  # App
+  APP_HOST: "0.0.0.0"
+  APP_PORT: "8000"
+  DEBUG: "false"
+  # Database
+  DATABASE_URL: "sqlite+aiosqlite:///./data/bilibili_rag.db"
+  # ChromaDB
+  CHROMA_PERSIST_DIRECTORY: "./data/chroma_db"
+  # LLM
+  OPENAI_BASE_URL: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  LLM_MODEL: "qwen3-max"
+  EMBEDDING_MODEL: "text-embedding-v4"
+  # ASR
+  DASHSCOPE_BASE_URL: "https://dashscope.aliyuncs.com/api/v1"
+  ASR_MODEL: "paraformer-v2"
+  # LangSmith
+  LANGCHAIN_TRACING_V2: "false"
+  LANGSMITH_TRACING: "false"
+  LANGSMITH_PROJECT: "bilibili-rag"
+  LANGSMITH_ENDPOINT: "https://api.smith.langchain.com"
+  # Agentic RAG
+  AGENTIC_RAG_TOP_K: "5"
+  AGENTIC_RAG_MAX_HOPS: "3"
+  # Chunking
+  CHUNK_TARGET_SIZE: "750"
+  CHUNK_MIN_SIZE: "300"
+  CHUNK_MAX_SIZE: "900"
+  CHUNK_OVERLAP: "100"
+  EMBEDDING_VERSION: "v1"
+  # Frontend
+  NEXT_PUBLIC_API_URL: "http://bilibili-rag-backend:8000"

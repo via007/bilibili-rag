@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="100%" height="100%">
+  <!-- 深紫圆角底板 -->
+  <rect x="1" y="1" width="30" height="30" rx="7" fill="#0f0c29"/>
+  
+  <!-- 外轨道 -->
+  <circle cx="16" cy="16" r="12" fill="none" stroke="#4338ca" stroke-width="0.8" opacity="0.6"/>
+  
+  <!-- 内轨道 -->
+  <circle cx="16" cy="16" r="7" fill="none" stroke="#4338ca" stroke-width="0.8" opacity="0.6"/>
+  
+  <!-- 六边形骨架 -->
+  <path d="M16 8 L23 12 L23 20 L16 24 L9 20 L9 12 Z" 
+        fill="none" stroke="#6366f1" stroke-width="1" opacity="0.9"/>
+  
+  <!-- 6条主干连线 -->
+  <path d="M16 16 L16 8 M16 16 L23 12 M16 16 L23 20 M16 16 L16 24 M16 16 L9 20 M16 16 L9 12" 
+        stroke="#818cf8" stroke-width="0.8" opacity="0.7"/>
+  
+  <!-- 6个方向节点 -->
+  <circle cx="16" cy="8" r="1.3" fill="#a5b4fc"/>
+  <circle cx="23" cy="12" r="1.3" fill="#a5b4fc"/>
+  <circle cx="23" cy="20" r="1.3" fill="#a5b4fc"/>
+  <circle cx="16" cy="24" r="1.3" fill="#a5b4fc"/>
+  <circle cx="9" cy="20" r="1.3" fill="#a5b4fc"/>
+  <circle cx="9" cy="12" r="1.3" fill="#a5b4fc"/>
+  
+  <!-- 中心高光白点 -->
+  <circle cx="16" cy="16" r="3" fill="#e0e7ff" opacity="0.9"/>
+  <circle cx="16" cy="16" r="1.8" fill="#ffffff"/>
+</svg>
