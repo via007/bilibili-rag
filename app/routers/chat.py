@@ -16,7 +16,7 @@ from openai import OpenAI
 from langchain.schema import Document
 
 from app.database import get_db
-from app.models import ChatRequest, ChatResponse, FavoriteFolder, FavoriteVideo, VideoCache
+from app.models import ChatRequest, ChatResponse, TitleRequest, TitleResponse, FavoriteFolder, FavoriteVideo, VideoCache
 from app.config import settings
 from app.routers.knowledge import get_rag_service
 from app.services.retrieval import (
@@ -674,3 +674,58 @@ async def search_videos(query: str, k: int = 5):
     except Exception as e:
         logger.error(f"搜索失败: {e}")
         raise HTTPException(status_code=500, detail=f"搜索失败: {str(e)}")
+
+
+@router.post("/generate-title", response_model=TitleResponse)
+async def generate_title(req: TitleRequest):
+    """根据问答内容自动生成对话标题"""
+    if not req.question.strip():
+        raise HTTPException(status_code=400, detail="问题不能为空")
+
+    try:
+        client = _get_llm_client()
+
+        # 截取 answer 前 500 字做上下文，足够生成标题
+        answer_snippet = req.answer.strip()[:500] if req.answer.strip() else ""
+        context_block = (
+            f"用户问题：{req.question.strip()}\n"
+            f"助手回答（摘要）：{answer_snippet}"
+        ) if answer_snippet else f"用户问题：{req.question.strip()}"
+
+        system = (
+            "你是一个对话标题生成器。根据用户和助手的对话内容，生成一个简短的标题（不超过15个字）。\n"
+            "规则：\n"
+            "1. 只返回标题文本，不要加引号、句号或任何额外说明\n"
+            "2. 标题应该概括对话的核心主题，而不是描述对话行为\n"
+            "3. 使用中文\n"
+            "4. 如果问题是打招呼或闲聊，标题用对话中出现的具体主题；确实没有主题就用「闲聊」"
+        )
+
+        response = client.chat.completions.create(
+            model=settings.openai_model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": context_block},
+            ],
+            temperature=0.3,
+            max_tokens=32,
+        )
+
+        title = response.choices[0].message.content.strip()
+        # 去掉可能残留的引号
+        title = title.strip('"\'""''《》「」')
+        if not title:
+            title = req.question.strip()[:20]
+
+        logger.info(f"生成标题: {title}")
+        return TitleResponse(title=title)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"生成标题失败: {e}")
+        # fallback: 用问题截断
+        fallback = req.question.strip()[:20]
+        if len(req.question.strip()) > 20:
+            fallback += "..."
+        return TitleResponse(title=fallback)

@@ -174,3 +174,14 @@ class ChatResponse(BaseModel):
     """对话响应"""
     answer: str
     sources: list[dict]  # 来源视频列表
+
+
+class TitleRequest(BaseModel):
+    """标题生成请求"""
+    question: str
+    answer: str
+
+
+class TitleResponse(BaseModel):
+    """标题生成响应"""
+    title: str
