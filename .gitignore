@@ -32,6 +32,8 @@ env/
 *.swp
 *.swo
 *~
+.claude
+.history
 
 # 环境变量
 .env

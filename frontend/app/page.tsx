@@ -196,6 +196,7 @@ export default function Home() {
               <ChatPanel
                 statsKey={statsKey}
                 sessionId={auth.session}
+                userKey={auth.user}
                 folderIds={selectedFolderIds}
               />
             </section>

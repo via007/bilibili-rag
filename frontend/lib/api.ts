@@ -166,6 +166,10 @@ export interface ChatResponse {
     }>;
 }
 
+export interface TitleResponse {
+    title: string;
+}
+
 // ==================== API 函数 ====================
 
 // 认证相关
@@ -298,4 +302,11 @@ export const chatApi = {
             `/chat/search?query=${encodeURIComponent(query)}&k=${k}`,
             { method: "POST" }
         ),
+
+    // 生成对话标题
+    generateTitle: (question: string, answer: string) =>
+        request<TitleResponse>("/chat/generate-title", {
+            method: "POST",
+            body: JSON.stringify({ question, answer }),
+        }),
 };
