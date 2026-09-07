@@ -18,7 +18,6 @@ class RAGEmbeddingInitializationTest(unittest.TestCase):
                 FakeDashScopeEmbeddings,
             ),
             patch("app.services.rag.Chroma"),
-            patch("app.services.rag.ChatOpenAI"),
         ):
             rag = RAGService()
 

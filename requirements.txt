@@ -10,7 +10,6 @@ aiosqlite==0.20.0
 # LangChain + vector store
 langchain==0.3.7
 langchain-community==0.3.7
-langchain-openai==0.2.6
 langchain-chroma==0.1.4
 chromadb==0.5.15
 openai==1.59.7

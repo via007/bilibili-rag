@@ -12,10 +12,10 @@ export class ApiError extends Error {
 }
 
 // 通用请求函数
-async function request<T>(
+async function requestResponse(
     endpoint: string,
     options: RequestInit = {}
-): Promise<T> {
+): Promise<Response> {
     const url = `${API_BASE_URL}${endpoint}`;
 
     const response = await fetch(url, {
@@ -47,31 +47,15 @@ async function request<T>(
         throw new ApiError(response.status, message);
     }
 
-    return response.json();
+    return response;
+}
+
+async function request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
+    return (await requestResponse(endpoint, options)).json();
 }
 
 async function requestBlob(endpoint: string, options: RequestInit = {}): Promise<Blob> {
-    const response = await fetch(`${API_BASE_URL}${endpoint}`, {
-        ...options,
-        headers: {
-            "Content-Type": "application/json",
-            ...options.headers,
-        },
-    });
-
-    if (response.status === 401 && typeof window !== "undefined") {
-        localStorage.removeItem("bili_session");
-        localStorage.removeItem("bili_user");
-        window.location.href = "/";
-        throw new Error("会话已过期，请重新登录");
-    }
-
-    if (!response.ok) {
-        const payload = await response.json().catch(() => null) as { detail?: string } | null;
-        throw new ApiError(response.status, payload?.detail || `导出失败: ${response.status}`);
-    }
-
-    return response.blob();
+    return (await requestResponse(endpoint, options)).blob();
 }
 
 // ==================== 类型定义 ====================

@@ -114,18 +114,6 @@ class ContentSource(str, Enum):
     ASR = "asr"
 
 
-class VideoInfo(BaseModel):
-    """视频信息"""
-    bvid: str
-    cid: Optional[int] = None
-    title: str
-    description: Optional[str] = None
-    owner_name: Optional[str] = None
-    owner_mid: Optional[int] = None
-    duration: Optional[int] = None
-    pic_url: Optional[str] = None
-
-
 class VideoContent(BaseModel):
     """视频内容（含摘要）"""
     bvid: str
