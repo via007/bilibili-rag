@@ -33,7 +33,7 @@ Bilibili demo video: [https://b23.tv/bGXyhjU](https://b23.tv/bGXyhjU)
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=via007/bilibili-rag&type=Date)](https://star-history.com/#via007/bilibili-rag&Date)
+[![Star History Chart](https://star-history.dera.page/svg?repos=via007/bilibili-rag&type=Date)](https://star-history.dera.page/#via007/bilibili-rag&Date)
 
 ---
 
