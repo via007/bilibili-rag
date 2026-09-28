@@ -41,7 +41,7 @@ Self-hosting uses your own model API key and does not use credits from the hoste
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=via007/bilibili-rag&type=Date)](https://star-history.com/#via007/bilibili-rag&Date)
+[![Star History Chart](https://star-history.dera.page/svg?repos=via007/bilibili-rag&type=Date)](https://star-history.dera.page/#via007/bilibili-rag&Date)
 
 ---
 

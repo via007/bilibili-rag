@@ -38,7 +38,7 @@
 本地部署使用你自己的模型 API Key，不消耗在线版积分。
 
 ## ⭐ Star History
-[![Star History Chart](https://api.star-history.com/svg?repos=via007/bilibili-rag&type=Date)](https://star-history.com/#via007/bilibili-rag&Date)
+[![Star History Chart](https://star-history.dera.page/svg?repos=via007/bilibili-rag&type=Date)](https://star-history.dera.page/#via007/bilibili-rag&Date)
 
 ---
 
