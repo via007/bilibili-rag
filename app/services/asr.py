@@ -129,7 +129,30 @@ class ASRService:
             return self._transcode_audio_to_wav(file_path)
         return self._transcode_audio_to_pcm(file_path)
 
-    def _recognize_local_file(self, file_path: str) -> Optional[str]:
+    @staticmethod
+    def _seconds(value: Any, *, milliseconds: bool = False) -> Optional[float]:
+        if value is None:
+            return None
+        try:
+            seconds = float(value)
+        except (TypeError, ValueError):
+            return None
+        return seconds / 1000 if milliseconds else seconds
+
+    @classmethod
+    def _sentence_segment(cls, sentence: dict) -> Optional[dict]:
+        text = (sentence.get("text") or "").strip()
+        if not text:
+            return None
+        if "begin_time" in sentence or "end_time" in sentence:
+            start = cls._seconds(sentence.get("begin_time"), milliseconds=True)
+            end = cls._seconds(sentence.get("end_time"), milliseconds=True)
+        else:
+            start = cls._seconds(sentence.get("start"))
+            end = cls._seconds(sentence.get("end"))
+        return {"text": text, "start": start, "end": end}
+
+    def _recognize_local_file(self, file_path: str) -> Optional[dict]:
         """使用 Recognition 直传本地音频"""
         ensure_not_cancelled(self.cancel_check)
         self._configure()
@@ -165,16 +188,18 @@ class ASRService:
             if isinstance(sentences, dict):
                 sentences = [sentences]
             texts = []
+            segments = []
             for s in sentences:
                 if isinstance(s, dict):
-                    t = s.get("text") or ""
-                    if t:
-                        texts.append(t)
+                    segment = self._sentence_segment(s)
+                    if segment:
+                        texts.append(segment["text"])
+                        segments.append(segment)
             text = "\n".join(texts).strip() if texts else None
             if text:
                 preview = text[:120].replace("\n", " ").strip()
                 logger.info(f"ASR Recognition 成功，长度={len(text)}，预览：{preview}")
-            return text
+            return {"text": text, "segments": segments} if text else None
         except Exception as e:
             logger.warning(f"ASR Recognition 异常: {e}")
             return None
@@ -186,7 +211,7 @@ class ASRService:
                 except Exception:
                     logger.debug(f"ASR 临时文件清理失败: {path}")
 
-    def _download_transcription(self, url: str) -> Optional[str]:
+    def _download_transcription(self, url: str) -> Optional[dict]:
         ensure_not_cancelled(self.cancel_check)
         try:
             raw = urlrequest.urlopen(url).read().decode("utf-8")
@@ -196,21 +221,27 @@ class ASRService:
             return None
 
         texts = []
+        segments = []
         transcripts = data.get("transcripts") or []
         for item in transcripts:
-            text = item.get("text", "") or ""
-            if text:
-                texts.append(text)
-                continue
+            sentence_texts = []
             for s in item.get("sentences", []) or []:
                 s_text = s.get("text", "") or ""
                 if s_text:
-                    texts.append(s_text)
+                    segment = self._sentence_segment(s)
+                    if segment:
+                        sentence_texts.append(segment["text"])
+                        segments.append(segment)
+            if sentence_texts:
+                texts.extend(sentence_texts)
+            elif item.get("text"):
+                texts.append(item["text"])
 
         if not texts and isinstance(data.get("text"), str):
             texts.append(data["text"])
 
-        return "\n".join(texts).strip() if texts else None
+        text = "\n".join(texts).strip() if texts else None
+        return {"text": text, "segments": segments} if text else None
 
     def _build_api_url(self, *parts: str) -> str:
         base_url = self.base_url or getattr(dashscope, "base_http_api_url", None)
@@ -268,7 +299,7 @@ class ASRService:
             return data["output"]
         return data if isinstance(data, dict) else None
 
-    def _transcribe_sync_restful(self, audio_url: str, model: str) -> Optional[str]:
+    def _transcribe_sync_restful(self, audio_url: str, model: str) -> Optional[dict]:
         ensure_not_cancelled(self.cancel_check)
         self._configure()
         task_id = self._submit_transcription_task_restful(audio_url, model)
@@ -322,7 +353,7 @@ class ASRService:
         logger.warning("ASR 未返回有效转写结果(RESTful)")
         return None
 
-    def _transcribe_sync(self, audio_url: str) -> Optional[str]:
+    def _transcribe_sync(self, audio_url: str) -> Optional[dict]:
         ensure_not_cancelled(self.cancel_check)
         self._configure()
         if audio_url.startswith("oss://"):
@@ -415,24 +446,36 @@ class ASRService:
             logger.warning(f"ASR 临时文件上传失败: {e}")
             return None
 
-    async def transcribe_url(self, audio_url: str) -> Optional[str]:
+    async def transcribe_url_with_timestamps(self, audio_url: str) -> Optional[dict]:
         result = await asyncio.to_thread(self._transcribe_sync, audio_url)
         ensure_not_cancelled(self.cancel_check)
         return result
 
-    async def transcribe_local_file(self, file_path: str) -> Optional[str]:
-        """本地文件直传识别（Recognition）"""
+    async def transcribe_url(self, audio_url: str) -> Optional[str]:
+        """转写音频并返回纯文本，兼容旧调用方。"""
+        result = await self.transcribe_url_with_timestamps(audio_url)
+        return result.get("text") if result else None
+
+    async def transcribe_local_file_with_timestamps(self, file_path: str) -> Optional[dict]:
+        """本地文件直传识别（Recognition），保留服务端返回的句子时间。"""
         result = await asyncio.to_thread(self._recognize_local_file, file_path)
         ensure_not_cancelled(self.cancel_check)
         return result
 
+    async def transcribe_local_file(self, file_path: str) -> Optional[str]:
+        """本地文件识别并返回纯文本，兼容旧调用方。"""
+        result = await self.transcribe_local_file_with_timestamps(file_path)
+        return result.get("text") if result else None
+
     def _transcribe_sync_with_model(self, audio_url: str, model: str) -> Optional[str]:
         """使用指定模型转写（用于本地文件上传）"""
         if audio_url.startswith("oss://"):
-            return self._transcribe_sync_restful(audio_url, model)
+            result = self._transcribe_sync_restful(audio_url, model)
+            return result.get("text") if result else None
         original_model = self.model
         try:
             self.model = model
-            return self._transcribe_sync(audio_url)
+            result = self._transcribe_sync(audio_url)
+            return result.get("text") if result else None
         finally:
             self.model = original_model

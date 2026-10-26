@@ -714,11 +714,22 @@ body {
 }
 
 .source-link {
+  display: grid;
+  gap: 2px;
   font-size: 12px;
   color: var(--accent-strong);
-  white-space: nowrap;
+}
+
+.source-link span {
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-link small,
+.execution-snippet small {
+  color: var(--muted);
+  font-size: 10px;
 }
 
 .source-link:hover {

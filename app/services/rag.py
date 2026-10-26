@@ -57,6 +57,7 @@ class RAGService:
         self.text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=1000,
             chunk_overlap=200,
+            add_start_index=True,
             separators=["\n\n", "\n", "。", "！", "？", ".", "!", "?", " "]
         )
         
@@ -93,6 +94,76 @@ class RAGService:
                 "url": f"https://www.bilibili.com/video/{video.bvid}",
             },
         )
+
+    def _build_transcript_documents(self, video: VideoContent, title: str) -> List[Document]:
+        """Split transcript text by page and map each chunk to real ASR times."""
+        grouped: dict[Optional[int], list[dict]] = {}
+        for segment in video.segments or []:
+            if not isinstance(segment, dict):
+                continue
+            text = (segment.get("text") or "").strip()
+            if not text:
+                continue
+            page = segment.get("page")
+            try:
+                page = int(page) if page is not None else None
+            except (TypeError, ValueError):
+                page = None
+            grouped.setdefault(page, []).append(segment)
+
+        documents: List[Document] = []
+        chunk_index = 0
+        for page, segments in grouped.items():
+            source_parts = []
+            spans = []
+            cursor = 0
+            for segment in segments:
+                text = segment["text"].strip()
+                if source_parts:
+                    cursor += 1  # newline separator
+                start = cursor
+                source_parts.append(text)
+                cursor += len(text)
+                spans.append((start, cursor, segment))
+            source_text = "\n".join(source_parts)
+
+            search_from = 0
+            for chunk_document in self.text_splitter.create_documents([source_text]):
+                chunk = chunk_document.page_content.strip()
+                if len(chunk) <= 5:
+                    continue
+                start = chunk_document.metadata.get("start_index")
+                if start is None:
+                    start = source_text.find(chunk, search_from)
+                if start < 0:
+                    start = source_text.find(chunk)
+                end = start + len(chunk) if start >= 0 else -1
+                matched = [
+                    segment for span_start, span_end, segment in spans
+                    if start >= 0 and span_start < end and span_end > start
+                ]
+                timed = [
+                    segment for segment in matched
+                    if segment.get("start") is not None and segment.get("end") is not None
+                ]
+                metadata = {
+                    "bvid": video.bvid,
+                    "title": title,
+                    "source": video.source.value,
+                    "doc_type": "chunk",
+                    "chunk_index": chunk_index,
+                    "url": f"https://www.bilibili.com/video/{video.bvid}",
+                }
+                if page is not None:
+                    metadata["page"] = page
+                if timed:
+                    metadata["start_time"] = min(float(segment["start"]) for segment in timed)
+                    metadata["end_time"] = max(float(segment["end"]) for segment in timed)
+                documents.append(Document(page_content=chunk, metadata=metadata))
+                if start >= 0:
+                    search_from = start + max(1, len(chunk) - self.text_splitter._chunk_overlap)
+                chunk_index += 1
+        return documents
     
     def add_video_content(
         self,
@@ -135,17 +206,55 @@ class RAGService:
             logger.warning(f"[{video.bvid}] 内容太少，跳过")
             return 0
         
-        # 分块
-        chunks = self.text_splitter.split_text(full_content)
-        
-        if not chunks:
+        # ASR sentence metadata lets chunks retain their source P and playback time.
+        # Older cache entries have no segments and continue through the legacy path.
+        transcript_documents = self._build_transcript_documents(video, title)
+        if transcript_documents:
+            content_documents = transcript_documents
+            if video.outline:
+                outline_parts = ["内容提纲"]
+                for item in video.outline:
+                    item_title = item.get("title", "") or ""
+                    outline_parts.append(item_title)
+                    outline_parts.extend(
+                        point.get("content", "") or ""
+                        for point in item.get("points", [])
+                        if point.get("content")
+                    )
+                outline_text = "\n".join(part for part in outline_parts if part).strip()
+                for chunk in self.text_splitter.split_text(outline_text):
+                    if len(chunk.strip()) > 5:
+                        content_documents.append(Document(
+                            page_content=chunk.strip(),
+                            metadata={
+                                "bvid": video.bvid,
+                                "title": title,
+                                "source": video.source.value,
+                                "doc_type": "chunk",
+                                "chunk_index": len(content_documents),
+                                "url": f"https://www.bilibili.com/video/{video.bvid}",
+                            },
+                        ))
+        else:
+            chunks = self.text_splitter.split_text(full_content)
+            content_documents = [
+                Document(
+                    page_content=chunk.strip(),
+                    metadata={
+                        "bvid": video.bvid,
+                        "title": title,
+                        "source": video.source.value,
+                        "doc_type": "chunk",
+                        "chunk_index": i,
+                        "url": f"https://www.bilibili.com/video/{video.bvid}",
+                    },
+                )
+                for i, chunk in enumerate(chunks)
+                if chunk and chunk.strip() and len(chunk.strip()) > 5
+            ]
+
+        if not content_documents:
             logger.warning(f"[{video.bvid}] 没有生成文档块")
-            return 0
-        
-        # 过滤空内容块
-        valid_chunks = [c for c in chunks if c and c.strip() and len(c.strip()) > 5]
-        if not valid_chunks:
-            logger.warning(f"[{video.bvid}] 没有有效的文档块")
             return 0
         
         # 创建文档。额外加入一条元信息文档，提升标题/简介/UP主类问题召回率。
@@ -154,19 +263,7 @@ class RAGService:
         if metadata_doc:
             documents.append(metadata_doc)
 
-        for i, chunk in enumerate(valid_chunks):
-            doc = Document(
-                page_content=chunk.strip(),  # 确保是干净的字符串
-                metadata={
-                    "bvid": video.bvid,
-                    "title": title,
-                    "source": video.source.value,
-                    "doc_type": "chunk",
-                    "chunk_index": i,
-                    "url": f"https://www.bilibili.com/video/{video.bvid}"
-                }
-            )
-            documents.append(doc)
+        documents.extend(content_documents)
         
         # 添加到向量库
         added_ids: List[str] = []

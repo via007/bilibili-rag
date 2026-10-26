@@ -95,11 +95,13 @@ class ContentFetcher:
 
         pages = self._extract_video_pages(video_info, cid)
         if len(pages) > 1:
-            asr_text = await self._try_multi_part_asr(bvid, pages)
+            asr_result = await self._try_multi_part_asr(bvid, pages)
         else:
-            asr_cid = pages[0]["cid"] if pages else cid
-            asr_text = await self._try_asr(bvid, asr_cid)
+            page = pages[0] if pages else {"cid": cid, "page": 1, "part": "P1"}
+            asr_result = await self._try_asr(bvid, page["cid"])
+            asr_result = self._result_for_page(asr_result, page)
         ensure_not_cancelled(self.cancel_check)
+        asr_text = asr_result.get("text") if asr_result else None
         if asr_text:
             logger.info(f"[{bvid}] 使用 ASR 文本")
             return VideoContent(
@@ -111,6 +113,7 @@ class ContentFetcher:
                 owner_name=owner_name,
                 owner_mid=owner_mid,
                 duration=duration,
+                segments=asr_result.get("segments") or None,
             )
         
         # ASR 失败时，补齐基础信息（避免遗漏简介）
@@ -157,23 +160,58 @@ class ContentFetcher:
             return pages
         return [{"cid": fallback_cid, "page": 1, "part": "P1"}] if fallback_cid else []
 
-    async def _try_multi_part_asr(self, bvid: str, pages: list[dict]) -> Optional[str]:
-        """逐个分 P 转写并合并文本。"""
+    @staticmethod
+    def _normalize_asr_result(result) -> dict:
+        """兼容旧 ASR 实现的纯文本返回值。"""
+        if isinstance(result, str):
+            text = result.strip()
+            return {"text": text, "segments": []} if text else {"text": "", "segments": []}
+        if isinstance(result, dict):
+            text = (result.get("text") or "").strip()
+            segments = [
+                segment for segment in (result.get("segments") or [])
+                if isinstance(segment, dict) and (segment.get("text") or "").strip()
+            ]
+            return {"text": text, "segments": segments}
+        return {"text": "", "segments": []}
+
+    @classmethod
+    def _result_for_page(cls, result, page: dict) -> dict:
+        normalized = cls._normalize_asr_result(result)
+        if not normalized["text"]:
+            return normalized
+        segments = normalized["segments"]
+        if not segments:
+            # Older ASR clients only return text. Keep the true P mapping while
+            # leaving time absent instead of inventing a timestamp.
+            segments = [{"text": normalized["text"]}]
+        for segment in segments:
+            segment.setdefault("page", page.get("page"))
+            segment.setdefault("part", page.get("part"))
+        normalized["segments"] = segments
+        return normalized
+
+    async def _try_multi_part_asr(self, bvid: str, pages: list[dict]) -> Optional[dict]:
+        """逐个分 P 转写并保留分 P 与句子时间信息。"""
         logger.info(f"[{bvid}] 检测到多 P 视频，共 {len(pages)} P，开始逐 P ASR")
         parts = []
+        segments = []
         for page in pages:
             ensure_not_cancelled(self.cancel_check)
             page_no = page["page"]
             part_title = page["part"]
-            text = await self._try_asr(bvid, page["cid"])
+            result = self._result_for_page(await self._try_asr(bvid, page["cid"]), page)
             ensure_not_cancelled(self.cancel_check)
+            text = result["text"]
             if text:
                 parts.append(f"## P{page_no} {part_title}\n\n{text}")
+                segments.extend(result["segments"])
             else:
                 logger.warning(f"[{bvid}] P{page_no} ASR 未获取到有效文本")
-        return "\n\n".join(parts).strip() or None
+        content = "\n\n".join(parts).strip()
+        return {"text": content, "segments": segments} if content else None
 
-    async def _try_asr(self, bvid: str, cid: int) -> Optional[str]:
+    async def _try_asr(self, bvid: str, cid: int) -> Optional[dict]:
         """尝试进行音频转写"""
         try:
             ensure_not_cancelled(self.cancel_check)
@@ -186,18 +224,24 @@ class ContentFetcher:
             ensure_not_cancelled(self.cancel_check)
             if status is not None and status < 400:
                 logger.info(f"[{bvid}] 音频 URL 可达，使用 Transcription")
-                text = await self.asr.transcribe_url(audio_url)
+                transcribe = getattr(self.asr, "transcribe_url_with_timestamps", None)
+                if not callable(transcribe):
+                    transcribe = self.asr.transcribe_url
+                result = self._normalize_asr_result(await transcribe(audio_url))
             else:
                 logger.info(f"[{bvid}] 音频 URL 不可达，使用 Recognition 兜底")
-                text = await self._try_asr_with_local_audio(bvid, cid, audio_url)
+                result = self._normalize_asr_result(
+                    await self._try_asr_with_local_audio(bvid, cid, audio_url)
+                )
             ensure_not_cancelled(self.cancel_check)
 
+            text = result["text"]
             if not text or len(text) < 50:
                 logger.info(f"[{bvid}] ASR 内容过少")
                 return None
             preview = text[:120].replace("\n", " ").strip()
             logger.info(f"[{bvid}] ASR 成功，长度={len(text)}，预览：{preview}")
-            return text
+            return result
         except Exception as e:
             logger.warning(f"[{bvid}] ASR 失败: {e}")
             return None
@@ -235,7 +279,7 @@ class ContentFetcher:
 
     async def _try_asr_with_local_audio(
         self, bvid: str, cid: int, audio_url: str
-    ) -> Optional[str]:
+    ) -> Optional[dict]:
         """本地下载后使用 Recognition 直传"""
         ensure_not_cancelled(self.cancel_check)
         tmp_dir = os.path.join("data", "asr_tmp")
@@ -264,12 +308,17 @@ class ContentFetcher:
                 logger.debug(f"[{bvid}] 清理过小音频失败: {file_path}")
             return None
 
-        text = await self.asr.transcribe_local_file(file_path)
+        transcribe = getattr(self.asr, "transcribe_local_file_with_timestamps", None)
+        if not callable(transcribe):
+            transcribe = self.asr.transcribe_local_file
+        result = self._normalize_asr_result(await transcribe(file_path))
         ensure_not_cancelled(self.cancel_check)
+        text = result["text"]
         if text:
             preview = text[:120].replace("\n", " ").strip()
             logger.info(f"[{bvid}] Recognition ASR 成功，长度={len(text)}，预览：{preview}")
-        return text
+            return result
+        return None
 
     def _transcode_audio_to_wav(self, bvid: str, file_path: str) -> Optional[str]:
         """使用 ffmpeg 转码为 16k 单声道 wav，提高 ASR 兼容性"""

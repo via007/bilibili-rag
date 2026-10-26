@@ -9,7 +9,7 @@ interface Message {
   id: string;
   role: "user" | "assistant";
   content: string;
-  sources?: Array<{ bvid: string; title: string; url: string }>;
+  sources?: Array<{ bvid: string; title: string; url: string; page?: number | null; start_time?: number | null; end_time?: number | null }>;
   trace?: TraceEvent[];
   traceOpen?: boolean;
   traceDone?: boolean;
@@ -22,6 +22,9 @@ interface TraceEvent {
   title?: string;
   preview?: string;
   url?: string;
+  page?: number | null;
+  start_time?: number | null;
+  end_time?: number | null;
   folder_count?: number;
   video_count?: number;
   vector_count?: number;
@@ -33,7 +36,7 @@ interface TraceEvent {
 type StreamEvent =
   | TraceEvent
   | { type: "token"; content: string }
-  | { type: "sources"; items: Array<{ bvid: string; title: string; url: string }> }
+  | { type: "sources"; items: Array<{ bvid: string; title: string; url: string; page?: number | null; start_time?: number | null; end_time?: number | null }> }
   | { type: "done" }
   | { type: "error"; message: string };
 
@@ -100,6 +103,9 @@ function ExecutionTrace({
                   key={`${event.title}-${index}`}
                 >
                   <strong>{event.title}</strong>
+                  {formatSourcePosition(event.page, event.start_time) && (
+                    <small>{formatSourcePosition(event.page, event.start_time)}</small>
+                  )}
                   <span>{event.preview}</span>
                 </a>
               ))}
@@ -109,6 +115,22 @@ function ExecutionTrace({
       )}
     </div>
   );
+}
+
+function formatSourcePosition(page?: number | null, seconds?: number | null): string {
+  const labels = [];
+  if (page != null) labels.push(`P${page}`);
+  if (seconds != null && Number.isFinite(seconds) && seconds >= 0) {
+    const value = Math.floor(seconds);
+    const hours = Math.floor(value / 3600);
+    const minutes = Math.floor((value % 3600) / 60);
+    const remaining = value % 60;
+    const time = hours > 0
+      ? `${hours}:${String(minutes).padStart(2, "0")}:${String(remaining).padStart(2, "0")}`
+      : `${minutes}:${String(remaining).padStart(2, "0")}`;
+    labels.push(time);
+  }
+  return labels.join(" · ");
 }
 
 export default function ChatPanel({ statsKey, sessionId, folderIds }: Props) {
@@ -169,7 +191,7 @@ export default function ChatPanel({ statsKey, sessionId, folderIds }: Props) {
       const decoder = new TextDecoder("utf-8");
       let answerBuffer = "";
       let pendingBuffer = "";
-      let pendingSources: Array<{ bvid: string; title: string; url: string }> = [];
+      let pendingSources: Array<{ bvid: string; title: string; url: string; page?: number | null; start_time?: number | null; end_time?: number | null }> = [];
       let streamCompleted = false;
 
       const applyEvent = (event: StreamEvent) => {
@@ -371,7 +393,10 @@ export default function ChatPanel({ statsKey, sessionId, folderIds }: Props) {
                       <div className="source-list">
                         {m.sources.map((s, i) => (
                           <a key={i} href={s.url} target="_blank" rel="noopener noreferrer" className="source-link">
-                            {s.title}
+                            <span>{s.title}</span>
+                            {formatSourcePosition(s.page, s.start_time) && (
+                              <small>{formatSourcePosition(s.page, s.start_time)}</small>
+                            )}
                           </a>
                         ))}
                       </div>

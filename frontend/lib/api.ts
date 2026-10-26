@@ -184,6 +184,9 @@ export interface ChatResponse {
         bvid: string;
         title: string;
         url: string;
+        page?: number | null;
+        start_time?: number | null;
+        end_time?: number | null;
     }>;
 }
 

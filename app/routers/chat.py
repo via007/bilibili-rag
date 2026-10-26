@@ -22,6 +22,7 @@ from app.routers.knowledge import get_rag_service
 from app.services.retrieval import (
     build_snippet,
     extract_keywords as extract_retrieval_keywords,
+    build_video_url,
     keyword_score,
     merge_ranked_documents,
 )
@@ -80,11 +81,33 @@ def _build_snippet_event(doc: Document) -> dict:
     if len(preview) > 220:
         preview = preview[:220].rstrip() + "..."
     bvid = meta.get("bvid", "")
+    page = meta.get("page")
+    start_time = meta.get("start_time")
+    end_time = meta.get("end_time")
     return {
         "bvid": bvid,
         "title": meta.get("title", "") or bvid or "未命名视频",
         "preview": preview,
-        "url": meta.get("url") or (f"https://www.bilibili.com/video/{bvid}" if bvid else ""),
+        "url": build_video_url(bvid, page=page, start_time=start_time) if bvid else "",
+        "page": page,
+        "start_time": start_time,
+        "end_time": end_time,
+    }
+
+
+def _source_from_document(doc: Document) -> dict:
+    meta = doc.metadata or {}
+    bvid = meta.get("bvid", "")
+    page = meta.get("page")
+    start_time = meta.get("start_time")
+    end_time = meta.get("end_time")
+    return {
+        "bvid": bvid,
+        "title": meta.get("title", ""),
+        "url": build_video_url(bvid, page=page, start_time=start_time) if bvid else "",
+        "page": page,
+        "start_time": start_time,
+        "end_time": end_time,
     }
 
 def _build_overview_messages(context: str, question: str) -> list[dict]:
@@ -736,13 +759,24 @@ async def _prepare_messages(
         logger.error(f"混合检索失败: {e}")
         raise RuntimeError("知识库检索失败") from e
     if docs:
-        context_parts, sources, seen_bvids = [], [], set()
+        context_parts, source_by_bvid = [], {}
         for doc in docs:
             bvid, title, content = doc.metadata.get("bvid", ""), doc.metadata.get("title", ""), doc.page_content.strip()
             if content: context_parts.append(f"【{title}】\n{content}")
-            if bvid and bvid not in seen_bvids:
-                seen_bvids.add(bvid)
-                sources.append({"bvid": bvid, "title": title, "url": f"https://www.bilibili.com/video/{bvid}"})
+            if bvid:
+                source = _source_from_document(doc)
+                existing = source_by_bvid.get(bvid)
+                source_score = (
+                    source.get("start_time") is not None,
+                    source.get("page") is not None,
+                )
+                existing_score = (
+                    existing.get("start_time") is not None,
+                    existing.get("page") is not None,
+                ) if existing else (False, False)
+                if not existing or source_score > existing_score:
+                    source_by_bvid[bvid] = source
+        sources = list(source_by_bvid.values())
         logger.info(f"准备问答上下文完成，耗时={time.perf_counter() - prepare_started:.2f}s")
         return _build_rag_messages("\n\n---\n\n".join(context_parts), question), sources, question
     # 兜底
@@ -850,7 +884,14 @@ async def search_videos(query: str, k: int = 5):
             results.append({
                 "bvid": bvid,
                 "title": doc.metadata.get("title", ""),
-                "url": doc.metadata.get("url", ""),
+                "url": build_video_url(
+                    bvid,
+                    page=doc.metadata.get("page"),
+                    start_time=doc.metadata.get("start_time"),
+                ),
+                "page": doc.metadata.get("page"),
+                "start_time": doc.metadata.get("start_time"),
+                "end_time": doc.metadata.get("end_time"),
                 "content_preview": doc.page_content[:200] + "..." if len(doc.page_content) > 200 else doc.page_content
             })
         return {"results": results}

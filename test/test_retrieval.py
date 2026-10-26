@@ -2,6 +2,7 @@ import unittest
 
 from app.services.retrieval import (
     build_snippet,
+    build_video_url,
     extract_keywords,
     keyword_score,
     merge_ranked_documents,
@@ -19,6 +20,17 @@ class FakeDoc:
 
 
 class RetrievalHelperTest(unittest.TestCase):
+    def test_build_video_url_includes_available_page_and_time(self):
+        self.assertEqual(
+            build_video_url("BV1", page=2, start_time=83.9),
+            "https://www.bilibili.com/video/BV1?p=2&t=83",
+        )
+        self.assertEqual(
+            build_video_url("BV1", page=2),
+            "https://www.bilibili.com/video/BV1?p=2",
+        )
+        self.assertEqual(build_video_url("BV1"), "https://www.bilibili.com/video/BV1")
+
     def test_extract_keywords_keeps_english_and_chinese_ngrams(self):
         keywords = extract_keywords("RAG 召回率怎么提升，中西方文化差异")
 

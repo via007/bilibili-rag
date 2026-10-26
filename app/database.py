@@ -3,7 +3,7 @@ Bilibili RAG 知识库系统
 
 数据库管理模块
 """
-from sqlalchemy import event
+from sqlalchemy import event, inspect
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from contextlib import asynccontextmanager
 from app.config import settings
@@ -64,6 +64,14 @@ async def init_db():
     """初始化数据库（创建表）"""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        if engine.dialect.name == "sqlite":
+            columns = await conn.run_sync(
+                lambda sync_conn: inspect(sync_conn).get_columns("video_cache")
+            )
+            if not any(column["name"] == "transcript_segments" for column in columns):
+                await conn.exec_driver_sql(
+                    "ALTER TABLE video_cache ADD COLUMN transcript_segments JSON"
+                )
 
 
 async def get_db() -> AsyncSession:

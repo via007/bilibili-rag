@@ -294,9 +294,12 @@ async def _ingest_single_video(
                 duration=meta.get("duration"),
             )
             ensure_not_cancelled(cancel_check)
+            previous_content = cache.content
             cache.content = content.content
             cache.content_source = content.source.value
             cache.outline_json = content.outline
+            if content.segments or content.content != previous_content:
+                cache.transcript_segments = content.segments
             if has_vectors:
                 await asyncio.to_thread(rag.delete_video, bvid)
                 ensure_not_cancelled(cancel_check)
@@ -517,11 +520,19 @@ async def _sync_folder(
                 elif new_text and new_text != old_content:
                     should_update_cache = True
                     should_reindex = True
+                elif content.segments and content.segments != (cache.transcript_segments or []):
+                    should_update_cache = True
+                    should_reindex = True
 
                 if cache and should_update_cache:
+                    previous_segments = cache.transcript_segments
                     cache.content = content.content
                     cache.content_source = content.source.value
                     cache.outline_json = content.outline
+                    if content.segments or new_text != old_content:
+                        cache.transcript_segments = content.segments
+                    elif previous_segments:
+                        cache.transcript_segments = previous_segments
                     logger.info(f"[{bvid}] 已写入缓存: source={cache.content_source}")
 
             # 需要重建向量：新增/升级/内容变化 或 向量缺失
@@ -538,6 +549,7 @@ async def _sync_folder(
                             owner_name=meta.get("owner_name"),
                             owner_mid=meta.get("owner_mid"),
                             duration=meta.get("duration"),
+                            segments=cache.transcript_segments,
                         )
                         logger.info(f"[{bvid}] 使用缓存 ASR 内容重建向量")
                     else:
@@ -554,6 +566,7 @@ async def _sync_folder(
                             cache.content = content.content
                             cache.content_source = content.source.value
                             cache.outline_json = content.outline
+                            cache.transcript_segments = content.segments
                             logger.info(f"[{bvid}] 已写入缓存: source={cache.content_source}")
                 try:
                     rag.delete_video(bvid)

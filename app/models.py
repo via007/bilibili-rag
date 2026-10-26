@@ -33,6 +33,7 @@ class VideoCache(Base):
     content = Column(Text, nullable=True)  # 摘要/字幕文本
     content_source = Column(String(20), nullable=True)  # ai_summary / subtitle / basic_info
     outline_json = Column(JSON, nullable=True)  # 分段提纲
+    transcript_segments = Column(JSON, nullable=True)  # 带时间戳的 ASR 句子
     
     # 元信息
     duration = Column(Integer, nullable=True)  # 视频时长（秒）
@@ -125,6 +126,7 @@ class VideoContent(BaseModel):
     owner_name: Optional[str] = None
     owner_mid: Optional[int] = None
     duration: Optional[int] = None
+    segments: Optional[list[dict]] = None
 
 
 class QRCodeResponse(BaseModel):

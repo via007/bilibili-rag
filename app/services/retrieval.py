@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 from typing import Any, Iterable, Mapping, Sequence
+from urllib.parse import urlencode
 
 
 _STOPWORDS = {
@@ -17,6 +18,32 @@ _STOPWORDS = {
     "总结", "概括", "分析", "解释", "说明", "评价", "区别", "内容", "视频", "收藏",
     "收藏夹", "知识库", "这个", "那个", "里面", "相关", "关于", "一下", "一下子",
 }
+
+
+def build_video_url(
+    bvid: str,
+    *,
+    page: int | None = None,
+    start_time: float | int | None = None,
+) -> str:
+    """Build a Bilibili video link, adding only available playback coordinates."""
+    url = f"https://www.bilibili.com/video/{bvid}"
+    params = {}
+    if page is not None:
+        try:
+            page_number = int(page)
+            if page_number > 0:
+                params["p"] = page_number
+        except (TypeError, ValueError):
+            pass
+    if start_time is not None:
+        try:
+            seconds = float(start_time)
+            if seconds >= 0:
+                params["t"] = int(seconds)
+        except (TypeError, ValueError):
+            pass
+    return f"{url}?{urlencode(params)}" if params else url
 
 
 def extract_keywords(text: str, max_keywords: int = 16) -> list[str]:

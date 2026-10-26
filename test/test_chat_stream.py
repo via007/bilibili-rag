@@ -47,6 +47,27 @@ class ChatStreamHelperTest(unittest.TestCase):
         self.assertLessEqual(len(event["preview"]), 223)
         self.assertEqual(event["url"], "https://www.bilibili.com/video/BV1")
 
+    def test_snippet_and_answer_sources_link_to_p_and_timestamp(self):
+        document = Document(
+            page_content="检索到的片段内容",
+            metadata={
+                "bvid": "BV1",
+                "title": "测试视频",
+                "page": 2,
+                "start_time": 91.8,
+                "end_time": 105.2,
+            },
+        )
+
+        snippet = chat._build_snippet_event(document)
+        source = chat._source_from_document(document)
+
+        self.assertEqual(snippet["url"], "https://www.bilibili.com/video/BV1?p=2&t=91")
+        self.assertEqual(snippet["page"], 2)
+        self.assertEqual(source["url"], snippet["url"])
+        self.assertEqual(source["start_time"], 91.8)
+        self.assertEqual(source["end_time"], 105.2)
+
     def test_data_inspection_error_is_user_facing(self):
         error = Exception("InternalError.Algo.DataInspectionFailed: data_inspection_failed")
 

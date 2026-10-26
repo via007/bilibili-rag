@@ -94,6 +94,7 @@ async def _sync_vectors(
                 content=content_text,
                 source=_parse_source(cache.content_source),
                 outline=cache.outline_json,
+                segments=cache.transcript_segments,
             )
             rag.add_video_content(video)
 
